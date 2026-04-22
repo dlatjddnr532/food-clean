@@ -5,7 +5,7 @@ import {
 } from 'react-native';
 import { colors, spacing, borderRadius, shadow } from '../utils/theme';
 import { useApp, calculateDailyGoals } from '../context/AppContext';
-import { ActivityLevel, Gender } from '../types';
+import { ActivityLevel, Gender, GoalType } from '../types';
 
 interface ActivityLevelOption {
   key: ActivityLevel;
@@ -21,6 +21,12 @@ const ACTIVITY_LEVELS: ActivityLevelOption[] = [
   { key: 'active', label: '활발한 활동', desc: '매일 운동', emoji: '💪' },
 ];
 
+const GOAL_TYPES: { key: GoalType; label: string; desc: string; emoji: string; color: string }[] = [
+  { key: 'diet',     label: '다이어트',  desc: '칼로리 -500kcal · 탄40/단30/지30',  emoji: '🥗', color: '#E74C3C' },
+  { key: 'maintain', label: '유지',      desc: '유지 칼로리 · 탄50/단20/지30',       emoji: '⚖️', color: '#3498DB' },
+  { key: 'muscle',   label: '근육 증가', desc: '칼로리 +300kcal · 탄45/단30/지25',  emoji: '💪', color: '#2ECC71' },
+];
+
 export default function ProfileScreen() {
   const { currentUser, updateProfile, logout, dailyGoals } = useApp();
   const profile = currentUser?.profile;
@@ -33,6 +39,7 @@ export default function ProfileScreen() {
   const [activityLevel, setActivityLevel] = useState<ActivityLevel>(
     profile?.activityLevel ?? 'moderate',
   );
+  const [goalType, setGoalType] = useState<GoalType>(profile?.goalType ?? 'maintain');
 
   useEffect(() => {
     if (profile) {
@@ -41,10 +48,11 @@ export default function ProfileScreen() {
       setHeight(profile.height);
       setWeight(profile.weight);
       setActivityLevel(profile.activityLevel);
+      setGoalType(profile.goalType ?? 'maintain');
     }
   }, [currentUser]);
 
-  const previewGoals = calculateDailyGoals({ gender, age, height, weight, activityLevel });
+  const previewGoals = calculateDailyGoals({ gender, age, height, weight, activityLevel, goalType });
   const goals = editing ? previewGoals : dailyGoals;
 
   const handleSave = (): void => {
@@ -52,7 +60,7 @@ export default function ProfileScreen() {
       Alert.alert('입력 오류', '나이, 키, 몸무게를 모두 입력해주세요.');
       return;
     }
-    updateProfile({ gender, age, height, weight, activityLevel });
+    updateProfile({ gender, age, height, weight, activityLevel, goalType });
     setEditing(false);
     Alert.alert('저장 완료! ✅', '신체 정보가 업데이트됐어요.');
   };
@@ -64,6 +72,7 @@ export default function ProfileScreen() {
       setHeight(profile.height);
       setWeight(profile.weight);
       setActivityLevel(profile.activityLevel);
+      setGoalType(profile.goalType ?? 'maintain');
     }
     setEditing(false);
   };
@@ -159,6 +168,30 @@ export default function ProfileScreen() {
               <Text style={styles.unit}>{field.unit}</Text>
             </View>
           </View>
+        ))}
+
+        <Text style={styles.label}>목표</Text>
+        {GOAL_TYPES.map((g) => (
+          <TouchableOpacity
+            key={g.key}
+            style={[
+              styles.activityBtn,
+              goalType === g.key && { borderColor: g.color, backgroundColor: g.color + '15' },
+              !editing && styles.disabled,
+            ]}
+            onPress={() => editing && setGoalType(g.key)}
+          >
+            <View style={styles.activityLeft}>
+              <Text style={styles.activityEmoji}>{g.emoji}</Text>
+              <View>
+                <Text style={[styles.activityLabel, goalType === g.key && { color: g.color }]}>
+                  {g.label}
+                </Text>
+                <Text style={styles.activityDesc}>{g.desc}</Text>
+              </View>
+            </View>
+            {goalType === g.key && <Text style={[styles.checkMark, { color: g.color }]}>✓</Text>}
+          </TouchableOpacity>
         ))}
 
         <Text style={styles.label}>활동량</Text>

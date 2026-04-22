@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useRef } from 'react';
 import {
   View, Text, StyleSheet, TouchableOpacity,
   TextInput, Modal, FlatList, Alert,
@@ -134,6 +134,8 @@ export default function RecipeScreen() {
   const [searchText, setSearchText] = useState('');
   const [expandedId, setExpandedId] = useState<number | null>(null);
   const [modalItem, setModalItem] = useState<ModalItem | null>(null);
+  const [selectedIngredients, setSelectedIngredients] = useState<string[]>([]);
+  const recipeListRef = useRef<FlatList>(null);
 
   const filteredRecipes = useMemo(() => {
     const q = searchText.toLowerCase();
@@ -152,14 +154,41 @@ export default function RecipeScreen() {
   );
 
   const filteredIngredients = useMemo<Food[]>(() => {
-    const allItems: Food[] = [
-      ...DUMMY_FOODS.map((f) => ({ ...f, type: 'food' as const })),
-      ...DUMMY_INGREDIENTS.map((i) => ({ ...i, type: 'ingredient' as const })),
-    ];
     const q = searchText.toLowerCase();
-    if (!q) return allItems;
-    return allItems.filter((i) => i.name.toLowerCase().includes(q));
+    if (!q) return DUMMY_INGREDIENTS;
+    return DUMMY_INGREDIENTS.filter((i) => i.name.toLowerCase().includes(q));
   }, [searchText]);
+
+  // 선택한 재료로 만들 수 있는 레시피 추천 (최소 2개 선택 시)
+  const recommendedRecipes = useMemo(() => {
+    if (selectedIngredients.length < 2) return [];
+    return DUMMY_RECIPES.filter((recipe) => {
+      const matchCount = recipe.ingredients.filter((ri) =>
+        selectedIngredients.some(
+          (ing) => ri.name.includes(ing) || ing.includes(ri.name),
+        ),
+      ).length;
+      // 레시피 재료의 절반 이상이 선택된 재료에 포함되면 추천
+      return matchCount >= Math.ceil(recipe.ingredients.length / 2);
+    });
+  }, [selectedIngredients]);
+
+  const toggleIngredient = (name: string): void => {
+    setSelectedIngredients((prev) =>
+      prev.includes(name) ? prev.filter((n) => n !== name) : [...prev, name],
+    );
+  };
+
+  const goToRecipe = (recipeId: number): void => {
+    setActiveTab(1);
+    setExpandedId(recipeId);
+    const index = DUMMY_RECIPES.findIndex((r) => r.id === recipeId);
+    if (index !== -1) {
+      setTimeout(() => {
+        recipeListRef.current?.scrollToIndex({ index, animated: true, viewPosition: 0.1 });
+      }, 100);
+    }
+  };
 
   const toggleLike = (id: number): void => {
     toggleFavorite(id);
@@ -232,11 +261,12 @@ export default function RecipeScreen() {
     );
   };
 
-  // 음식/재료 카드
-  const FoodCard = ({ item }: { item: Food }) => {
+  // 재료 카드
+  const IngredientCard = ({ item }: { item: Food }) => {
     const n = item.nutrition;
+    const isSelected = selectedIngredients.includes(item.name);
     return (
-      <View style={styles.foodCard}>
+      <View style={[styles.foodCard, isSelected && styles.foodCardSelected]}>
         <Text style={styles.foodEmoji}>{item.emoji}</Text>
         <View style={styles.foodBody}>
           <View style={styles.foodTitleRow}>
@@ -250,8 +280,11 @@ export default function RecipeScreen() {
             <NutriBadge label="지방" value={n.fat} color="#9B59B6" />
           </View>
         </View>
-        <TouchableOpacity style={styles.smallAddBtn} onPress={() => setModalItem(item)}>
-          <Text style={styles.smallAddBtnText}>+</Text>
+        <TouchableOpacity
+          style={[styles.smallAddBtn, isSelected && styles.smallAddBtnSelected]}
+          onPress={() => toggleIngredient(item.name)}
+        >
+          <Text style={styles.smallAddBtnText}>{isSelected ? '✓' : '+'}</Text>
         </TouchableOpacity>
       </View>
     );
@@ -308,20 +341,77 @@ export default function RecipeScreen() {
         />
       ) : activeTab === 1 ? (
         <FlatList
+          ref={recipeListRef}
           data={filteredRecipes}
           keyExtractor={(item) => String(item.id)}
           renderItem={({ item }) => <RecipeCard item={item} />}
           contentContainerStyle={styles.list}
           showsVerticalScrollIndicator={false}
+          onScrollToIndexFailed={(info) => {
+            setTimeout(() => {
+              recipeListRef.current?.scrollToIndex({ index: info.index, animated: true });
+            }, 300);
+          }}
           ListEmptyComponent={<Text style={styles.emptyText}>검색 결과가 없어요 😅</Text>}
         />
       ) : (
         <FlatList
           data={filteredIngredients}
-          keyExtractor={(item) => `${item.type ?? 'food'}-${item.id}`}
-          renderItem={({ item }) => <FoodCard item={item} />}
+          keyExtractor={(item) => `ing-${item.id}`}
+          renderItem={({ item }) => <IngredientCard item={item} />}
           contentContainerStyle={styles.list}
           showsVerticalScrollIndicator={false}
+          ListHeaderComponent={
+            <>
+              {selectedIngredients.length > 0 && (
+                <View style={styles.selectedBox}>
+                  <View style={styles.selectedHeader}>
+                    <Text style={styles.selectedTitle}>🧺 선택한 재료</Text>
+                    <TouchableOpacity onPress={() => setSelectedIngredients([])}>
+                      <Text style={styles.clearText}>전체 삭제</Text>
+                    </TouchableOpacity>
+                  </View>
+                  <View style={styles.chipRow}>
+                    {selectedIngredients.map((name) => (
+                      <TouchableOpacity
+                        key={name}
+                        style={styles.chip}
+                        onPress={() => toggleIngredient(name)}
+                      >
+                        <Text style={styles.chipText}>{name} ✕</Text>
+                      </TouchableOpacity>
+                    ))}
+                  </View>
+                  {recommendedRecipes.length > 0 && (
+                    <View style={styles.recommendBox}>
+                      <Text style={styles.recommendTitle}>
+                        🍳 만들 수 있는 레시피 {recommendedRecipes.length}개
+                      </Text>
+                      {recommendedRecipes.map((r) => (
+                        <TouchableOpacity
+                          key={r.id}
+                          style={styles.recommendItem}
+                          onPress={() => goToRecipe(r.id)}
+                        >
+                          <Text style={styles.recommendEmoji}>{r.emoji}</Text>
+                          <View style={{ flex: 1 }}>
+                            <Text style={styles.recommendName}>{r.title}</Text>
+                            <Text style={styles.recommendCal}>🔥 {r.totalNutrition.calories} kcal · ⏱️ {r.cookTime}분</Text>
+                          </View>
+                          <Text style={styles.recommendArrow}>→</Text>
+                        </TouchableOpacity>
+                      ))}
+                    </View>
+                  )}
+                  {selectedIngredients.length < 2 ? (
+                    <Text style={styles.noRecommend}>재료를 {2 - selectedIngredients.length}개 더 선택하면 레시피를 추천해드려요!</Text>
+                  ) : recommendedRecipes.length === 0 ? (
+                    <Text style={styles.noRecommend}>😅 선택한 재료로 만들 수 있는 레시피가 없어요</Text>
+                  ) : null}
+                </View>
+              )}
+            </>
+          }
           ListEmptyComponent={<Text style={styles.emptyText}>검색 결과가 없어요 😅</Text>}
         />
       )}
@@ -409,6 +499,34 @@ const styles = StyleSheet.create({
     backgroundColor: colors.primary, justifyContent: 'center', alignItems: 'center',
   },
   smallAddBtnText: { color: '#fff', fontSize: 22, fontWeight: '700', lineHeight: 28 },
+  foodCardSelected: { borderWidth: 2, borderColor: colors.primary },
+  smallAddBtnSelected: { backgroundColor: '#2ECC71' },
+  selectedBox: {
+    backgroundColor: colors.white, borderRadius: borderRadius.lg,
+    padding: spacing.md, marginBottom: spacing.md, ...shadow.small,
+  },
+  selectedHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: spacing.sm },
+  selectedTitle: { fontSize: 14, fontWeight: '700', color: colors.text },
+  clearText: { fontSize: 12, color: '#E74C3C', fontWeight: '600' },
+  chipRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginBottom: spacing.sm },
+  chip: {
+    backgroundColor: colors.primaryLight, borderRadius: borderRadius.full,
+    paddingHorizontal: spacing.sm, paddingVertical: 4,
+  },
+  chipText: { fontSize: 12, color: colors.primary, fontWeight: '600' },
+  recommendBox: {
+    borderTopWidth: 1, borderTopColor: colors.border, paddingTop: spacing.sm, marginTop: spacing.sm,
+  },
+  recommendTitle: { fontSize: 13, fontWeight: '700', color: colors.text, marginBottom: spacing.sm },
+  recommendItem: {
+    flexDirection: 'row', alignItems: 'center', gap: spacing.sm,
+    paddingVertical: spacing.sm, borderBottomWidth: 1, borderBottomColor: colors.background,
+  },
+  recommendEmoji: { fontSize: 28 },
+  recommendName: { fontSize: 14, fontWeight: '700', color: colors.text },
+  recommendCal: { fontSize: 11, color: colors.textLight, marginTop: 2 },
+  recommendArrow: { fontSize: 16, color: colors.primary, fontWeight: '700' },
+  noRecommend: { fontSize: 13, color: colors.textLight, textAlign: 'center', paddingVertical: spacing.sm },
   emptyFav: { alignItems: 'center', marginTop: spacing.xl * 2, paddingHorizontal: spacing.lg },
   emptyFavIcon: { fontSize: 52, marginBottom: spacing.md },
   emptyFavTitle: { fontSize: 18, fontWeight: '800', color: colors.text, marginBottom: spacing.sm },

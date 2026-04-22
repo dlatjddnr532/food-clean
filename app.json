@@ -19,6 +19,10 @@
         "monochromeImage": "./assets/images/android-icon-monochrome.png"
       },
       "edgeToEdgeEnabled": true,
+      "usesCleartextTraffic": true,
+      "navigationBar": {
+        "visible": "immersive"
+      },
       "predictiveBackGestureEnabled": false,
       "package": "com.dlatjddnr5322.foodclean"
     },

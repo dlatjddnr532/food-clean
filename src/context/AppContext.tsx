@@ -1,19 +1,20 @@
-import React, { createContext, useContext, useState, useCallback } from 'react';
+import React, { createContext, useContext, useState, useCallback, useMemo } from 'react';
 import {
   AppContextType, AppUser, UserProfile, MealLogEntry,
-  MealType, Food, DailyGoals, SignupData, ActivityLevel,
+  MealType, Food, DailyGoals, SignupData, ActivityLevel, GoalType,
 } from '../types';
 import { DUMMY_FOODS } from '../data/dummyData';
 
 const AppContext = createContext<AppContextType | null>(null);
 
-// ── 해리스-베네딕트 공식으로 1일 권장량 계산 ──
+// ── 해리스-베네딕트 + 목표 타입으로 1일 권장량 계산 ──
 export function calculateDailyGoals(profile: Partial<UserProfile>): DailyGoals {
   const a = parseFloat(profile.age ?? '25');
   const h = parseFloat(profile.height ?? '170');
   const w = parseFloat(profile.weight ?? '65');
   const gender = profile.gender ?? 'male';
   const activityLevel: ActivityLevel = profile.activityLevel ?? 'moderate';
+  const goalType: GoalType = profile.goalType ?? 'maintain';
 
   const bmr =
     gender === 'male'
@@ -28,11 +29,20 @@ export function calculateDailyGoals(profile: Partial<UserProfile>): DailyGoals {
   };
   const tdee = Math.round(bmr * multipliers[activityLevel]);
 
+  // 목표 타입별 칼로리·탄단지 비율 조정
+  const goalAdjust: Record<GoalType, { calAdj: number; carbs: number; protein: number; fat: number }> = {
+    diet:     { calAdj: -500, carbs: 0.40, protein: 0.30, fat: 0.30 },
+    maintain: { calAdj:    0, carbs: 0.50, protein: 0.20, fat: 0.30 },
+    muscle:   { calAdj: +300, carbs: 0.45, protein: 0.30, fat: 0.25 },
+  };
+  const adj = goalAdjust[goalType];
+  const targetCal = Math.max(1200, tdee + adj.calAdj);
+
   return {
-    calories: tdee,
-    carbs: Math.round((tdee * 0.5) / 4),
-    protein: Math.round((tdee * 0.2) / 4),
-    fat: Math.round((tdee * 0.3) / 9),
+    calories: targetCal,
+    carbs: Math.round((targetCal * adj.carbs) / 4),
+    protein: Math.round((targetCal * adj.protein) / 4),
+    fat: Math.round((targetCal * adj.fat) / 9),
     fiber: 25,
   };
 }
@@ -46,6 +56,7 @@ const DEFAULT_PROFILE: UserProfile = {
   height: '170',
   weight: '65',
   activityLevel: 'moderate',
+  goalType: 'maintain',
 };
 
 // ── 테스트 계정 ──
@@ -62,16 +73,33 @@ const INITIAL_USERS: AppUser[] = [
       height: '175',
       weight: '72',
       activityLevel: 'moderate',
+      goalType: 'maintain',
     },
   },
 ];
 
 const todayStr = (): string => new Date().toDateString();
 
-// ── 초기 식단 로그 (테스트용) ──
+// 날짜 문자열 생성 (n일 전)
+const dateStr = (daysAgo: number): string => {
+  const d = new Date();
+  d.setDate(d.getDate() - daysAgo);
+  return d.toDateString();
+};
+
+// ── 초기 식단 로그 (테스트용 — 주간 그래프 확인용) ──
 const INITIAL_LOGS: MealLogEntry[] = [
-  { id: 1001, userId: 1, date: todayStr(), mealType: '아침', food: DUMMY_FOODS[6] },
-  { id: 1002, userId: 1, date: todayStr(), mealType: '점심', food: DUMMY_FOODS[0] },
+  { id: 1001, userId: 1, date: todayStr(),    mealType: '아침', food: DUMMY_FOODS[6] },
+  { id: 1002, userId: 1, date: todayStr(),    mealType: '점심', food: DUMMY_FOODS[0] },
+  { id: 1003, userId: 1, date: dateStr(1),    mealType: '아침', food: DUMMY_FOODS[2] },
+  { id: 1004, userId: 1, date: dateStr(1),    mealType: '저녁', food: DUMMY_FOODS[1] },
+  { id: 1005, userId: 1, date: dateStr(2),    mealType: '점심', food: DUMMY_FOODS[11] },
+  { id: 1006, userId: 1, date: dateStr(3),    mealType: '아침', food: DUMMY_FOODS[8] },
+  { id: 1007, userId: 1, date: dateStr(3),    mealType: '저녁', food: DUMMY_FOODS[14] },
+  { id: 1008, userId: 1, date: dateStr(4),    mealType: '점심', food: DUMMY_FOODS[7] },
+  { id: 1009, userId: 1, date: dateStr(5),    mealType: '아침', food: DUMMY_FOODS[9] },
+  { id: 1010, userId: 1, date: dateStr(5),    mealType: '저녁', food: DUMMY_FOODS[3] },
+  { id: 1011, userId: 1, date: dateStr(6),    mealType: '점심', food: DUMMY_FOODS[12] },
 ];
 
 // ── Provider ──
@@ -81,6 +109,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const [isLoggedIn, setIsLoggedIn] = useState(false);
   const [mealLogs, setMealLogs] = useState<MealLogEntry[]>(INITIAL_LOGS);
   const [favoriteIds, setFavoriteIds] = useState<number[]>([]);
+  const [waterLogs, setWaterLogs] = useState<{ date: string; amount: number }[]>([]);
 
   const login = useCallback(
     (email: string, password: string) => {
@@ -112,6 +141,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           height: userData.height,
           weight: userData.weight,
           activityLevel: 'moderate',
+          goalType: 'maintain',
         },
       };
       setUsers((prev) => [...prev, newUser]);
@@ -174,6 +204,34 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     [favoriteIds],
   );
 
+  // ── 물 섭취 ──
+  const todayWater = useMemo(
+    () => waterLogs.filter((w) => w.date === todayStr()).reduce((s, w) => s + w.amount, 0),
+    [waterLogs],
+  );
+
+  const addWater = useCallback((amount: number) => {
+    setWaterLogs((prev) => [...prev, { date: todayStr(), amount }]);
+  }, []);
+
+  const resetWater = useCallback(() => {
+    setWaterLogs((prev) => prev.filter((w) => w.date !== todayStr()));
+  }, []);
+
+  // ── 주간 칼로리 ──
+  const weeklyCalories = useMemo(() => {
+    const DAYS = ['일', '월', '화', '수', '목', '금', '토'];
+    return Array.from({ length: 7 }, (_, i) => {
+      const d = new Date();
+      d.setDate(d.getDate() - (6 - i));
+      const dStr = d.toDateString();
+      const calories = mealLogs
+        .filter((l) => l.date === dStr && l.userId === currentUser?.id)
+        .reduce((s, l) => s + (l.food?.nutrition?.calories ?? 0), 0);
+      return { day: DAYS[d.getDay()], calories };
+    });
+  }, [mealLogs, currentUser]);
+
   const todayLogs = mealLogs.filter(
     (l) => l.date === todayStr() && l.userId === currentUser?.id,
   );
@@ -197,6 +255,10 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         favoriteIds,
         toggleFavorite,
         isFavorite,
+        todayWater,
+        addWater,
+        resetWater,
+        weeklyCalories,
       }}
     >
       {children}

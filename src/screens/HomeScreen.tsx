@@ -66,8 +66,111 @@ const gaugeStyles = StyleSheet.create({
   fill: { height: '100%', borderRadius: 5 },
 });
 
+// ── 주간 칼로리 그래프 ──
+function WeeklyGraph({ data, goal }: { data: { day: string; calories: number }[]; goal: number }) {
+  const maxCal = Math.max(...data.map((d) => d.calories), goal, 1);
+  const todayIdx = data.length - 1;
+  return (
+    <View style={wStyles.container}>
+      <View style={wStyles.bars}>
+        {data.map((d, i) => {
+          const isToday = i === todayIdx;
+          const pct = d.calories / maxCal;
+          const over = d.calories > goal;
+          return (
+            <View key={i} style={wStyles.barCol}>
+              {d.calories > 0 && (
+                <Text style={wStyles.calLabel}>{d.calories > 999 ? `${Math.round(d.calories / 100) / 10}k` : d.calories}</Text>
+              )}
+              <View style={wStyles.barTrack}>
+                <View style={[
+                  wStyles.barFill,
+                  { height: `${Math.max(pct * 100, d.calories > 0 ? 4 : 0)}%` as `${number}%` },
+                  isToday && wStyles.barToday,
+                  over && wStyles.barOver,
+                ]} />
+                <View style={[wStyles.goalLine, { bottom: `${(goal / maxCal) * 100}%` as `${number}%` }]} />
+              </View>
+              <Text style={[wStyles.dayLabel, isToday && wStyles.dayLabelToday]}>{d.day}</Text>
+            </View>
+          );
+        })}
+      </View>
+      <Text style={wStyles.hint}>점선: 목표 칼로리 {goal}kcal</Text>
+    </View>
+  );
+}
+
+const wStyles = StyleSheet.create({
+  container: { marginTop: spacing.sm },
+  bars: { flexDirection: 'row', alignItems: 'flex-end', height: 120, gap: 4 },
+  barCol: { flex: 1, alignItems: 'center', height: '100%', justifyContent: 'flex-end' },
+  calLabel: { fontSize: 9, color: colors.textLight, marginBottom: 2 },
+  barTrack: {
+    width: '100%', flex: 1, backgroundColor: colors.border,
+    borderRadius: 4, overflow: 'visible', justifyContent: 'flex-end', position: 'relative',
+  },
+  barFill: { width: '100%', backgroundColor: colors.primary, borderRadius: 4 },
+  barToday: { backgroundColor: colors.primary },
+  barOver: { backgroundColor: '#E74C3C' },
+  goalLine: {
+    position: 'absolute', left: -2, right: -2, height: 1.5,
+    backgroundColor: '#F6A623', borderStyle: 'dashed',
+  },
+  dayLabel: { fontSize: 11, color: colors.textLight, marginTop: 4, fontWeight: '600' },
+  dayLabelToday: { color: colors.primary, fontWeight: '800' },
+  hint: { fontSize: 10, color: colors.textLight, textAlign: 'center', marginTop: spacing.xs },
+});
+
+// ── 물 섭취 트래커 ──
+function WaterTracker({ current, onAdd, onReset }: { current: number; onAdd: (n: number) => void; onReset: () => void }) {
+  const goal = 2000;
+  const cups = Math.floor(current / 250);
+  const totalCups = 8;
+  const pct = Math.min(current / goal, 1);
+  return (
+    <View style={waterStyles.container}>
+      <View style={waterStyles.headerRow}>
+        <Text style={waterStyles.title}>💧 물 섭취량</Text>
+        <TouchableOpacity onPress={onReset}>
+          <Text style={waterStyles.reset}>초기화</Text>
+        </TouchableOpacity>
+      </View>
+      <View style={waterStyles.cupsRow}>
+        {Array.from({ length: totalCups }, (_, i) => (
+          <Text key={i} style={{ fontSize: 22, opacity: i < cups ? 1 : 0.25 }}>🥤</Text>
+        ))}
+      </View>
+      <View style={waterStyles.track}>
+        <View style={[waterStyles.fill, { width: `${pct * 100}%` as `${number}%` }]} />
+      </View>
+      <View style={waterStyles.infoRow}>
+        <Text style={waterStyles.amount}>{current}ml <Text style={waterStyles.goal}>/ {goal}ml</Text></Text>
+        <TouchableOpacity style={waterStyles.addBtn} onPress={() => onAdd(250)}>
+          <Text style={waterStyles.addBtnText}>+ 한 컵 (250ml)</Text>
+        </TouchableOpacity>
+      </View>
+    </View>
+  );
+}
+
+const waterStyles = StyleSheet.create({
+  container: { marginTop: spacing.sm },
+  headerRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: spacing.sm },
+  title: { fontSize: 15, fontWeight: '700', color: colors.text },
+  reset: { fontSize: 12, color: colors.textLight },
+  cupsRow: { flexDirection: 'row', gap: 4, marginBottom: spacing.sm },
+  track: { height: 8, backgroundColor: colors.border, borderRadius: 4, overflow: 'hidden', marginBottom: spacing.sm },
+  fill: { height: '100%', backgroundColor: '#3498DB', borderRadius: 4 },
+  infoRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
+  amount: { fontSize: 14, fontWeight: '700', color: '#3498DB' },
+  goal: { fontWeight: '400', color: colors.textLight },
+  addBtn: { backgroundColor: '#EBF5FB', borderRadius: borderRadius.full, paddingHorizontal: spacing.md, paddingVertical: spacing.xs },
+  addBtnText: { fontSize: 13, color: '#3498DB', fontWeight: '700' },
+});
+
 export default function HomeScreen({ navigation }: Props) {
-  const { currentUser, todayLogs, dailyGoals, removeMealLog } = useApp();
+  const { currentUser, todayLogs, dailyGoals, removeMealLog, weeklyCalories, todayWater, addWater, resetWater } = useApp();
   const name = currentUser?.profile?.name ?? '사용자';
 
   const totals = todayLogs.reduce(
@@ -137,6 +240,17 @@ export default function HomeScreen({ navigation }: Props) {
             ? `⚠️ 목표 칼로리 ${totals.calories - dailyGoals.calories}kcal 초과`
             : `✨ 목표까지 ${dailyGoals.calories - totals.calories}kcal 남았어요`}
         </Text>
+      </View>
+
+      {/* 주간 칼로리 그래프 카드 */}
+      <View style={styles.card}>
+        <Text style={styles.sectionTitle}>📊 주간 칼로리</Text>
+        <WeeklyGraph data={weeklyCalories} goal={dailyGoals.calories} />
+      </View>
+
+      {/* 물 섭취 카드 */}
+      <View style={styles.card}>
+        <WaterTracker current={todayWater} onAdd={addWater} onReset={resetWater} />
       </View>
 
       {/* 영양소 게이지 카드 */}

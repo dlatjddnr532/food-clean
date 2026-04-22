@@ -68,6 +68,7 @@ export interface Recipe {
 // ── 사용자 프로필 (프론트 전용) ──
 export type Gender = 'male' | 'female';
 export type ActivityLevel = 'sedentary' | 'light' | 'moderate' | 'active';
+export type GoalType = 'diet' | 'maintain' | 'muscle';
 
 export interface UserProfile {
   name: string;
@@ -77,6 +78,7 @@ export interface UserProfile {
   height: string;
   weight: string;
   activityLevel: ActivityLevel;
+  goalType: GoalType;
 }
 
 export interface AppUser {
@@ -133,6 +135,12 @@ export interface AppContextType {
   favoriteIds: number[];
   toggleFavorite: (recipeId: number) => void;
   isFavorite: (recipeId: number) => boolean;
+  // 물 섭취
+  todayWater: number;
+  addWater: (amount: number) => void;
+  resetWater: () => void;
+  // 주간 칼로리
+  weeklyCalories: { day: string; calories: number }[];
 }
 
 export interface SignupData {

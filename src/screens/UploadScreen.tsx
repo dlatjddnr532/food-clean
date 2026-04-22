@@ -191,10 +191,25 @@ export default function UploadScreen({ route }: Props) {
   const food = detectedFood?.food;
   const n: NutritionInfo | undefined = food?.nutrition;
 
+  const handleReset = (): void => {
+    setImage(null);
+    setDetectedFood(null);
+    setSaved(false);
+  };
+
   return (
     <ScrollView style={styles.container} showsVerticalScrollIndicator={false}>
-      <Text style={styles.title}>AI 식단 분석</Text>
-      <Text style={styles.subtitle}>사진을 찍으면 AI가 음식을 인식하고 영양소를 불러옵니다.</Text>
+      <View style={styles.titleRow}>
+        <View>
+          <Text style={styles.title}>AI 식단 분석</Text>
+          <Text style={styles.subtitle}>사진을 찍으면 AI가 음식을 인식하고 영양소를 불러옵니다.</Text>
+        </View>
+        {(image || detectedFood) && (
+          <TouchableOpacity style={styles.resetBtn} onPress={handleReset}>
+            <Text style={styles.resetBtnText}>↺</Text>
+          </TouchableOpacity>
+        )}
+      </View>
 
       <Text style={styles.sectionLabel}>식사 시간</Text>
       <View style={styles.mealTypeRow}>
@@ -202,7 +217,7 @@ export default function UploadScreen({ route }: Props) {
           <TouchableOpacity
             key={type}
             style={[styles.mealTypeBtn, selectedMeal === type && styles.mealTypeBtnActive]}
-            onPress={() => setSelectedMeal(type)}
+            onPress={() => { setSelectedMeal(type); setSaved(false); }}
           >
             <Text style={[styles.mealTypeBtnText, selectedMeal === type && styles.mealTypeBtnTextActive]}>
               {type}
@@ -288,8 +303,18 @@ export default function UploadScreen({ route }: Props) {
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: colors.background, paddingHorizontal: spacing.lg },
+  titleRow: {
+    flexDirection: 'row', justifyContent: 'space-between',
+    alignItems: 'flex-start', marginBottom: spacing.lg,
+  },
   title: { fontSize: 22, fontWeight: '800', color: colors.text, marginTop: spacing.xl },
-  subtitle: { fontSize: 13, color: colors.textLight, marginTop: 4, marginBottom: spacing.lg },
+  subtitle: { fontSize: 13, color: colors.textLight, marginTop: 4 },
+  resetBtn: {
+    marginTop: spacing.xl, width: 40, height: 40, borderRadius: 20,
+    backgroundColor: colors.white, justifyContent: 'center', alignItems: 'center',
+    ...shadow.small, borderWidth: 1.5, borderColor: colors.border,
+  },
+  resetBtnText: { fontSize: 22, color: colors.text },
   sectionLabel: { fontSize: 13, fontWeight: '600', color: colors.text, marginBottom: spacing.sm },
   mealTypeRow: { flexDirection: 'row', gap: spacing.sm, marginBottom: spacing.lg },
   mealTypeBtn: {
