@@ -1,7 +1,8 @@
-import React from 'react';
+import React, { useState } from 'react';
 import {
   View, Text, ScrollView, StyleSheet, TouchableOpacity,
 } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { BottomTabNavigationProp } from '@react-navigation/bottom-tabs';
 import { colors, spacing, borderRadius, shadow } from '../utils/theme';
 import { useApp } from '../context/AppContext';
@@ -66,61 +67,100 @@ const gaugeStyles = StyleSheet.create({
   fill: { height: '100%', borderRadius: 5 },
 });
 
-// ── 주간 칼로리 그래프 ──
+// ── 주간 칼로리 라인 차트 ──
 function WeeklyGraph({ data, goal }: { data: { day: string; calories: number }[]; goal: number }) {
-  const maxCal = Math.max(...data.map((d) => d.calories), goal, 1);
+  const [chartW, setChartW] = useState(0);
+  const CHART_H = 100;
+  const TOP_PAD = 22;
+  const BOTTOM_PAD = 22;
+  const DOT_R = 5;
+  const LINE_T = 2.5;
   const todayIdx = data.length - 1;
+  const maxVal = Math.max(...data.map((d) => d.calories), goal, 1);
+
+  const pts = chartW > 0
+    ? data.map((d, i) => {
+        const x = data.length < 2 ? chartW / 2 : (i / (data.length - 1)) * chartW;
+        const y = TOP_PAD + (1 - d.calories / maxVal) * CHART_H;
+        return { ...d, x, y, isToday: i === todayIdx, over: d.calories > goal };
+      })
+    : [];
+
+  const goalY = TOP_PAD + (1 - Math.min(goal / maxVal, 1)) * CHART_H;
+
   return (
-    <View style={wStyles.container}>
-      <View style={wStyles.bars}>
-        {data.map((d, i) => {
-          const isToday = i === todayIdx;
-          const pct = d.calories / maxCal;
-          const over = d.calories > goal;
+    <View style={{ marginTop: spacing.sm }} onLayout={(e) => setChartW(e.nativeEvent.layout.width)}>
+      <View style={{ height: TOP_PAD + CHART_H + BOTTOM_PAD, position: 'relative' }}>
+        {/* 목표 칼로리 기준선 */}
+        {chartW > 0 && (
+          <View style={{
+            position: 'absolute', left: 0, right: 0, top: goalY,
+            height: 1.5, backgroundColor: '#F6A623', opacity: 0.55,
+          }} />
+        )}
+
+        {/* 꺾은선 */}
+        {pts.slice(1).map((p, i) => {
+          const prev = pts[i];
+          const dx = p.x - prev.x;
+          const dy = p.y - prev.y;
+          const len = Math.sqrt(dx * dx + dy * dy);
+          const angle = Math.atan2(dy, dx) * (180 / Math.PI);
           return (
-            <View key={i} style={wStyles.barCol}>
-              {d.calories > 0 && (
-                <Text style={wStyles.calLabel}>{d.calories > 999 ? `${Math.round(d.calories / 100) / 10}k` : d.calories}</Text>
-              )}
-              <View style={wStyles.barTrack}>
-                <View style={[
-                  wStyles.barFill,
-                  { height: `${Math.max(pct * 100, d.calories > 0 ? 4 : 0)}%` as `${number}%` },
-                  isToday && wStyles.barToday,
-                  over && wStyles.barOver,
-                ]} />
-                <View style={[wStyles.goalLine, { bottom: `${(goal / maxCal) * 100}%` as `${number}%` }]} />
-              </View>
-              <Text style={[wStyles.dayLabel, isToday && wStyles.dayLabelToday]}>{d.day}</Text>
-            </View>
+            <View key={i} style={{
+              position: 'absolute',
+              left: (prev.x + p.x) / 2 - len / 2,
+              top: (prev.y + p.y) / 2 - LINE_T / 2,
+              width: len, height: LINE_T,
+              backgroundColor: colors.primary,
+              borderRadius: LINE_T / 2,
+              transform: [{ rotate: `${angle}deg` }],
+            }} />
           );
         })}
+
+        {/* 데이터 포인트 */}
+        {pts.map((p, i) => (
+          <React.Fragment key={i}>
+            {p.calories > 0 && (
+              <Text style={{
+                position: 'absolute',
+                left: p.x - 20, top: p.y - 19,
+                width: 40, textAlign: 'center',
+                fontSize: 9,
+                fontWeight: p.isToday ? '800' : '600',
+                color: p.over ? '#E74C3C' : p.isToday ? colors.primary : colors.textLight,
+              }}>
+                {p.calories >= 1000 ? `${(p.calories / 1000).toFixed(1)}k` : p.calories}
+              </Text>
+            )}
+            <View style={{
+              position: 'absolute',
+              left: p.x - DOT_R, top: p.y - DOT_R,
+              width: DOT_R * 2, height: DOT_R * 2, borderRadius: DOT_R,
+              backgroundColor: p.over ? '#E74C3C' : p.isToday ? colors.primary : colors.white,
+              borderWidth: 2,
+              borderColor: p.over ? '#E74C3C' : colors.primary,
+            }} />
+            <Text style={{
+              position: 'absolute',
+              left: p.x - 15, top: TOP_PAD + CHART_H + 6,
+              width: 30, textAlign: 'center',
+              fontSize: 11,
+              fontWeight: p.isToday ? '800' : '600',
+              color: p.isToday ? colors.primary : colors.textLight,
+            }}>
+              {p.day}
+            </Text>
+          </React.Fragment>
+        ))}
       </View>
-      <Text style={wStyles.hint}>점선: 목표 칼로리 {goal}kcal</Text>
+      <Text style={{ fontSize: 10, color: colors.textLight, textAlign: 'center', marginTop: 4 }}>
+        {'── '}목표 {goal}kcal
+      </Text>
     </View>
   );
 }
-
-const wStyles = StyleSheet.create({
-  container: { marginTop: spacing.sm },
-  bars: { flexDirection: 'row', alignItems: 'flex-end', height: 120, gap: 4 },
-  barCol: { flex: 1, alignItems: 'center', height: '100%', justifyContent: 'flex-end' },
-  calLabel: { fontSize: 9, color: colors.textLight, marginBottom: 2 },
-  barTrack: {
-    width: '100%', flex: 1, backgroundColor: colors.border,
-    borderRadius: 4, overflow: 'visible', justifyContent: 'flex-end', position: 'relative',
-  },
-  barFill: { width: '100%', backgroundColor: colors.primary, borderRadius: 4 },
-  barToday: { backgroundColor: colors.primary },
-  barOver: { backgroundColor: '#E74C3C' },
-  goalLine: {
-    position: 'absolute', left: -2, right: -2, height: 1.5,
-    backgroundColor: '#F6A623', borderStyle: 'dashed',
-  },
-  dayLabel: { fontSize: 11, color: colors.textLight, marginTop: 4, fontWeight: '600' },
-  dayLabelToday: { color: colors.primary, fontWeight: '800' },
-  hint: { fontSize: 10, color: colors.textLight, textAlign: 'center', marginTop: spacing.xs },
-});
 
 // ── 물 섭취 트래커 ──
 function WaterTracker({ current, onAdd, onReset }: { current: number; onAdd: (n: number) => void; onReset: () => void }) {
@@ -170,6 +210,7 @@ const waterStyles = StyleSheet.create({
 });
 
 export default function HomeScreen({ navigation }: Props) {
+  const insets = useSafeAreaInsets();
   const { currentUser, todayLogs, dailyGoals, removeMealLog, weeklyCalories, todayWater, addWater, resetWater } = useApp();
   const name = currentUser?.profile?.name ?? '사용자';
 
@@ -181,9 +222,12 @@ export default function HomeScreen({ navigation }: Props) {
         carbs: acc.carbs + (n?.carbs ?? 0),
         protein: acc.protein + (n?.protein ?? 0),
         fat: acc.fat + (n?.fat ?? 0),
+        fiber: acc.fiber + (n?.fiber ?? 0),
+        sugar: acc.sugar + (n?.sugar ?? 0),
+        sodium: acc.sodium + (n?.sodium ?? 0),
       };
     },
-    { calories: 0, carbs: 0, protein: 0, fat: 0 },
+    { calories: 0, carbs: 0, protein: 0, fat: 0, fiber: 0, sugar: 0, sodium: 0 },
   );
 
   const calPct = Math.min(totals.calories / (dailyGoals.calories || 1), 1);
@@ -200,7 +244,7 @@ export default function HomeScreen({ navigation }: Props) {
   return (
     <ScrollView style={styles.container} showsVerticalScrollIndicator={false}>
       {/* 헤더 */}
-      <View style={styles.header}>
+      <View style={[styles.header, { paddingTop: spacing.xl + insets.top }]}>
         <View>
           <Text style={styles.greeting}>안녕하세요, {name}님 👋</Text>
           <Text style={styles.date}>
@@ -256,9 +300,12 @@ export default function HomeScreen({ navigation }: Props) {
       {/* 영양소 게이지 카드 */}
       <View style={styles.card}>
         <Text style={styles.sectionTitle}>영양소 섭취 현황</Text>
-        <NutrientGauge label="탄수화물" current={totals.carbs} goal={dailyGoals.carbs} color="#F6D365" />
+        <NutrientGauge label="탄수화물" current={totals.carbs} goal={dailyGoals.carbs} color="#F6A623" />
         <NutrientGauge label="단백질" current={totals.protein} goal={dailyGoals.protein} color="#2ECC71" />
         <NutrientGauge label="지방" current={totals.fat} goal={dailyGoals.fat} color="#F093FB" />
+        <NutrientGauge label="식이섬유" current={totals.fiber} goal={dailyGoals.fiber} color="#1ABC9C" />
+        <NutrientGauge label="당류" current={totals.sugar} goal={dailyGoals.sugar} color="#E74C3C" />
+        <NutrientGauge label="나트륨" current={totals.sodium} goal={dailyGoals.sodium} color="#E67E22" unit="mg" />
         <Text style={styles.goalHint}>
           🎯 1일 권장량은 나이·키·몸무게·성별 기준으로 계산됩니다
         </Text>
@@ -307,6 +354,9 @@ export default function HomeScreen({ navigation }: Props) {
                       <Text style={styles.foodName}>{log.food?.name}</Text>
                       <Text style={styles.foodNutrient}>
                         {log.food?.nutrition?.calories}kcal · 탄{log.food?.nutrition?.carbs}g · 단{log.food?.nutrition?.protein}g · 지{log.food?.nutrition?.fat}g
+                      </Text>
+                      <Text style={styles.foodNutrient}>
+                        섬유{log.food?.nutrition?.fiber ?? 0}g · 당{log.food?.nutrition?.sugar ?? 0}g · 나트륨{log.food?.nutrition?.sodium ?? 0}mg
                       </Text>
                     </View>
                     <TouchableOpacity

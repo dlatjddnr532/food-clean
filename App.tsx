@@ -4,6 +4,7 @@ import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { Text } from 'react-native';
 import { SafeAreaProvider, useSafeAreaInsets } from 'react-native-safe-area-context';
+import { StatusBar } from 'expo-status-bar';
 
 import { AppProvider, useApp } from './src/context/AppContext';
 import LoginScreen from './src/screens/LoginScreen';
@@ -104,6 +105,7 @@ function RootNavigator() {
 export default function App() {
   return (
     <SafeAreaProvider>
+      <StatusBar style="dark" />
       <AppProvider>
         <NavigationContainer>
           <RootNavigator />

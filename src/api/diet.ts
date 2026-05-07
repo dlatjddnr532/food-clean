@@ -5,7 +5,9 @@ import { MealType, NutritionInfo } from '../types';
 interface AnalyzeResponse {
   success: boolean;
   foodName: string;
+  candidates?: string[];
   nutrition?: NutritionInfo;
+  message?: string;
 }
 
 // 식사 기록 저장 요청 타입 (백엔드 meal-log.entity.ts 기반)

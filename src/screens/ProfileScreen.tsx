@@ -3,6 +3,7 @@ import {
   View, Text, StyleSheet, ScrollView,
   TouchableOpacity, TextInput, Alert,
 } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { colors, spacing, borderRadius, shadow } from '../utils/theme';
 import { useApp, calculateDailyGoals } from '../context/AppContext';
 import { ActivityLevel, Gender, GoalType } from '../types';
@@ -28,6 +29,7 @@ const GOAL_TYPES: { key: GoalType; label: string; desc: string; emoji: string; c
 ];
 
 export default function ProfileScreen() {
+  const insets = useSafeAreaInsets();
   const { currentUser, updateProfile, logout, dailyGoals } = useApp();
   const profile = currentUser?.profile;
 
@@ -80,7 +82,7 @@ export default function ProfileScreen() {
   return (
     <ScrollView style={styles.container} showsVerticalScrollIndicator={false}>
       {/* 프로필 헤더 */}
-      <View style={styles.profileHeader}>
+      <View style={[styles.profileHeader, { paddingTop: spacing.xl + insets.top }]}>
         <View style={styles.avatar}>
           <Text style={styles.avatarEmoji}>{profile?.gender === 'female' ? '👩' : '👨'}</Text>
         </View>

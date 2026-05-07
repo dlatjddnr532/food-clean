@@ -29,6 +29,7 @@ export interface NutritionInfo {
   protein: number;
   fat: number;
   fiber?: number;
+  sugar?: number;
   sodium?: number;
 }
 
@@ -95,6 +96,8 @@ export interface DailyGoals {
   protein: number;
   fat: number;
   fiber: number;
+  sugar: number;
+  sodium: number;
 }
 
 // ── 식단 기록 (프론트 전용) ──

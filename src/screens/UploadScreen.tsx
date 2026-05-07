@@ -2,14 +2,16 @@ import React, { useState } from 'react';
 import {
   View, Text, StyleSheet, TouchableOpacity,
   Image, Alert, ActivityIndicator, ScrollView,
+  Modal, TextInput, KeyboardAvoidingView, Platform,
 } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import * as ImagePicker from 'expo-image-picker';
 import { BottomTabNavigationProp } from '@react-navigation/bottom-tabs';
 import { RouteProp } from '@react-navigation/native';
 import { colors, spacing, borderRadius, shadow } from '../utils/theme';
 import { useApp } from '../context/AppContext';
 import { AI_FOOD_RESULTS, DUMMY_FOODS } from '../data/dummyData';
-import { MealType, AiAnalysisResult, NutritionInfo } from '../types';
+import { MealType, AiAnalysisResult, NutritionInfo, Food } from '../types';
 import { uploadFoodImage } from '../api/diet';
 
 type TabParamList = {
@@ -48,7 +50,7 @@ function matchFoodByName(name: string) {
 }
 
 // 실제 API 호출 → 실패하면 더미로 폴백
-async function realAiAnalyze(imageUri: string): Promise<AiAnalysisResult & { fromApi: boolean }> {
+async function realAiAnalyze(imageUri: string): Promise<AiAnalysisResult & { fromApi: boolean; apiCandidates?: string[] }> {
   try {
     const res = await uploadFoodImage(imageUri);
     if (!res.success) {
@@ -61,9 +63,9 @@ async function realAiAnalyze(imageUri: string): Promise<AiAnalysisResult & { fro
           aiResult: { name: res.foodName, confidence: 90, foodId: matched.id },
           food: matched,
           fromApi: true,
+          apiCandidates: res.candidates,
         };
       }
-      // 이름은 받았지만 DB에 없는 음식 → 기본 정보로 표시
       return {
         aiResult: { name: res.foodName, confidence: 85, foodId: -1 },
         food: {
@@ -72,16 +74,15 @@ async function realAiAnalyze(imageUri: string): Promise<AiAnalysisResult & { fro
           per: '1인분',
         },
         fromApi: true,
+        apiCandidates: res.candidates,
       };
     }
     throw new Error('API 분석 실패');
   } catch (error) {
     const message = error instanceof Error ? error.message : '';
-    // 음식이 아닌 경우 → 에러 던지기 (폴백 안 함)
     if (message.includes('음식')) {
       throw error;
     }
-    // 서버 연결 안 됨 → 더미로 폴백
     const dummy = await fakeAiAnalyze();
     return { ...dummy, fromApi: false };
   }
@@ -117,14 +118,27 @@ const nutriStyles = StyleSheet.create({
 });
 
 export default function UploadScreen({ route }: Props) {
+  const insets = useSafeAreaInsets();
   const { addMealLog } = useApp();
   const [image, setImage] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [detectedFood, setDetectedFood] = useState<(AiAnalysisResult & { fromApi?: boolean }) | null>(null);
+  const [candidates, setCandidates] = useState<Food[]>([]);
+  const [selectedFood, setSelectedFood] = useState<Food | null>(null);
   const [selectedMeal, setSelectedMeal] = useState<MealType>(
     route?.params?.mealType ?? '점심',
   );
   const [saved, setSaved] = useState(false);
+  const [quantity, setQuantity] = useState(100);
+  const [manualVisible, setManualVisible] = useState(false);
+  const [manualName, setManualName] = useState('');
+  const [manualCalories, setManualCalories] = useState('');
+  const [manualCarbs, setManualCarbs] = useState('');
+  const [manualProtein, setManualProtein] = useState('');
+  const [manualFat, setManualFat] = useState('');
+  const [manualFiber, setManualFiber] = useState('');
+  const [manualSugar, setManualSugar] = useState('');
+  const [manualSodium, setManualSodium] = useState('');
 
   const pickFromGallery = async (): Promise<void> => {
     const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
@@ -167,11 +181,35 @@ export default function UploadScreen({ route }: Props) {
     }
   };
 
+  const buildCandidates = (detected: Food): Food[] => {
+    const calRange = 250;
+    const same = DUMMY_FOODS.filter(
+      (f) => f.id !== detected.id && f.category === detected.category,
+    );
+    const similar = DUMMY_FOODS.filter(
+      (f) =>
+        f.id !== detected.id &&
+        f.category !== detected.category &&
+        Math.abs(f.nutrition.calories - detected.nutrition.calories) <= calRange,
+    );
+    return [...same, ...similar].slice(0, 4);
+  };
+
   const analyze = async (imageUri: string): Promise<void> => {
     setLoading(true);
     try {
       const result = await realAiAnalyze(imageUri);
       setDetectedFood(result);
+      setSelectedFood(result.food);
+      // API가 candidates 줬으면 그걸 DUMMY_FOODS에서 매칭, 없으면 로컬 로직
+      if (result.apiCandidates && result.apiCandidates.length > 0) {
+        const matched = result.apiCandidates
+          .map((name) => matchFoodByName(name))
+          .filter((f): f is Food => f !== undefined && f.id !== result.food.id);
+        setCandidates(matched.slice(0, 4));
+      } else {
+        setCandidates(buildCandidates(result.food));
+      }
     } catch (error) {
       const message = error instanceof Error ? error.message : '분석에 실패했어요.';
       setImage(null);
@@ -181,25 +219,99 @@ export default function UploadScreen({ route }: Props) {
     }
   };
 
-  const handleSave = (): void => {
-    if (!detectedFood) return;
-    addMealLog(selectedMeal, detectedFood.food);
-    setSaved(true);
-    Alert.alert('저장 완료! 🎉', `${selectedMeal}에 "${detectedFood.food.name}"이(가) 추가됐어요!`);
+  const [editNutriVisible, setEditNutriVisible] = useState(false);
+  const [editCalories, setEditCalories] = useState('');
+  const [editCarbs, setEditCarbs] = useState('');
+  const [editProtein, setEditProtein] = useState('');
+  const [editFat, setEditFat] = useState('');
+  const [editFiber, setEditFiber] = useState('');
+  const [editSugar, setEditSugar] = useState('');
+  const [editSodium, setEditSodium] = useState('');
+
+  const openEditNutri = (): void => {
+    const cn = computedN;
+    setEditCalories(String(cn?.calories ?? 0));
+    setEditCarbs(String(cn?.carbs ?? 0));
+    setEditProtein(String(cn?.protein ?? 0));
+    setEditFat(String(cn?.fat ?? 0));
+    setEditFiber(String(cn?.fiber ?? 0));
+    setEditSugar(String(cn?.sugar ?? 0));
+    setEditSodium(String(cn?.sodium ?? 0));
+    setEditNutriVisible(true);
   };
 
-  const food = detectedFood?.food;
+  const handleSave = (customNutrition?: NutritionInfo): void => {
+    if (!detectedFood) return;
+    const baseFood = selectedFood ?? detectedFood.food;
+    const nutritionToUse = customNutrition ?? computedN ?? baseFood.nutrition;
+    const foodToAdd: Food = { ...baseFood, nutrition: nutritionToUse };
+    addMealLog(selectedMeal, foodToAdd);
+    setSaved(true);
+    setEditNutriVisible(false);
+    Alert.alert('저장 완료! 🎉', `${selectedMeal}에 "${foodToAdd.name}"이(가) 추가됐어요!`);
+  };
+
+  const food = selectedFood ?? detectedFood?.food;
   const n: NutritionInfo | undefined = food?.nutrition;
+
+  // 100g 기준 영양소 × 수량 배율
+  const scale = quantity / 100;
+  const computedN: NutritionInfo | undefined = n ? {
+    calories: Math.round((n.calories ?? 0) * scale),
+    carbs: parseFloat(((n.carbs ?? 0) * scale).toFixed(1)),
+    protein: parseFloat(((n.protein ?? 0) * scale).toFixed(1)),
+    fat: parseFloat(((n.fat ?? 0) * scale).toFixed(1)),
+    fiber: parseFloat(((n.fiber ?? 0) * scale).toFixed(1)),
+    sugar: parseFloat(((n.sugar ?? 0) * scale).toFixed(1)),
+    sodium: Math.round((n.sodium ?? 0) * scale),
+  } : undefined;
 
   const handleReset = (): void => {
     setImage(null);
     setDetectedFood(null);
+    setSelectedFood(null);
+    setCandidates([]);
     setSaved(false);
+    setQuantity(100);
+  };
+
+  const handleManualSave = (): void => {
+    if (!manualName.trim() || !manualCalories.trim()) {
+      Alert.alert('입력 오류', '음식 이름과 칼로리는 필수예요.');
+      return;
+    }
+    const food: Food = {
+      id: Date.now(),
+      name: manualName.trim(),
+      emoji: '🍽️',
+      category: '직접 입력',
+      per: '1인분',
+      nutrition: {
+        calories: parseFloat(manualCalories) || 0,
+        carbs: parseFloat(manualCarbs) || 0,
+        protein: parseFloat(manualProtein) || 0,
+        fat: parseFloat(manualFat) || 0,
+        fiber: parseFloat(manualFiber) || 0,
+        sugar: parseFloat(manualSugar) || 0,
+        sodium: parseFloat(manualSodium) || 0,
+      },
+    };
+    addMealLog(selectedMeal, food);
+    Alert.alert('추가 완료! 🎉', `${selectedMeal}에 "${food.name}"이(가) 추가됐어요!`);
+    setManualName('');
+    setManualCalories('');
+    setManualCarbs('');
+    setManualProtein('');
+    setManualFat('');
+    setManualFiber('');
+    setManualSugar('');
+    setManualSodium('');
+    setManualVisible(false);
   };
 
   return (
     <ScrollView style={styles.container} showsVerticalScrollIndicator={false}>
-      <View style={styles.titleRow}>
+      <View style={[styles.titleRow, { marginTop: insets.top }]}>
         <View>
           <Text style={styles.title}>AI 식단 분석</Text>
           <Text style={styles.subtitle}>사진을 찍으면 AI가 음식을 인식하고 영양소를 불러옵니다.</Text>
@@ -254,6 +366,81 @@ export default function UploadScreen({ route }: Props) {
         </TouchableOpacity>
       </View>
 
+      <TouchableOpacity style={styles.manualBtn} onPress={() => setManualVisible(true)}>
+        <Text style={styles.manualBtnText}>✏️ 직접 입력하기</Text>
+      </TouchableOpacity>
+
+      <Modal visible={manualVisible} transparent animationType="slide" onRequestClose={() => setManualVisible(false)}>
+        <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={{ flex: 1 }}>
+          <TouchableOpacity style={mStyles.backdrop} activeOpacity={1} onPress={() => setManualVisible(false)} />
+          <View style={mStyles.sheet}>
+            <Text style={mStyles.title}>음식 직접 입력</Text>
+
+            <Text style={mStyles.label}>음식 이름 *</Text>
+            <TextInput
+              style={mStyles.input}
+              placeholder="예: 닭볶음탕"
+              placeholderTextColor={colors.textLight}
+              value={manualName}
+              onChangeText={setManualName}
+            />
+
+            <Text style={mStyles.label}>칼로리 (kcal) *</Text>
+            <TextInput
+              style={mStyles.input}
+              placeholder="예: 450"
+              placeholderTextColor={colors.textLight}
+              value={manualCalories}
+              onChangeText={setManualCalories}
+              keyboardType="numeric"
+            />
+
+            <Text style={mStyles.sectionLabel}>영양소 (선택)</Text>
+            <View style={mStyles.nutriRow}>
+              <View style={{ flex: 1 }}>
+                <Text style={mStyles.label}>탄수화물 (g)</Text>
+                <TextInput style={mStyles.input} placeholder="0" placeholderTextColor={colors.textLight}
+                  value={manualCarbs} onChangeText={setManualCarbs} keyboardType="numeric" />
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text style={mStyles.label}>단백질 (g)</Text>
+                <TextInput style={mStyles.input} placeholder="0" placeholderTextColor={colors.textLight}
+                  value={manualProtein} onChangeText={setManualProtein} keyboardType="numeric" />
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text style={mStyles.label}>지방 (g)</Text>
+                <TextInput style={mStyles.input} placeholder="0" placeholderTextColor={colors.textLight}
+                  value={manualFat} onChangeText={setManualFat} keyboardType="numeric" />
+              </View>
+            </View>
+            <View style={mStyles.nutriRow}>
+              <View style={{ flex: 1 }}>
+                <Text style={mStyles.label}>식이섬유 (g)</Text>
+                <TextInput style={mStyles.input} placeholder="0" placeholderTextColor={colors.textLight}
+                  value={manualFiber} onChangeText={setManualFiber} keyboardType="numeric" />
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text style={mStyles.label}>당류 (g)</Text>
+                <TextInput style={mStyles.input} placeholder="0" placeholderTextColor={colors.textLight}
+                  value={manualSugar} onChangeText={setManualSugar} keyboardType="numeric" />
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text style={mStyles.label}>나트륨 (mg)</Text>
+                <TextInput style={mStyles.input} placeholder="0" placeholderTextColor={colors.textLight}
+                  value={manualSodium} onChangeText={setManualSodium} keyboardType="numeric" />
+              </View>
+            </View>
+
+            <TouchableOpacity style={mStyles.addBtn} onPress={handleManualSave}>
+              <Text style={mStyles.addBtnText}>{selectedMeal}에 추가하기 →</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={mStyles.cancelBtn} onPress={() => setManualVisible(false)}>
+              <Text style={mStyles.cancelText}>취소</Text>
+            </TouchableOpacity>
+          </View>
+        </KeyboardAvoidingView>
+      </Modal>
+
       {detectedFood && !loading && (
         <View style={styles.resultCard}>
           <View style={styles.resultHeader}>
@@ -263,20 +450,69 @@ export default function UploadScreen({ route }: Props) {
                 {detectedFood.fromApi ? '🌐 AI 분석 결과' : '🎲 AI 분석 결과 (오프라인)'} ({detectedFood.aiResult.confidence}% 확신)
               </Text>
               <Text style={styles.foodName}>{food?.name}</Text>
-              <Text style={styles.perText}>{food?.per}</Text>
+              <Text style={styles.perText}>{quantity}g 기준</Text>
+            </View>
+          </View>
+
+          {candidates.length > 0 && (
+            <View style={styles.candidatesBox}>
+              <Text style={styles.candidatesTitle}>🤔 혹시 이 메뉴인가요?</Text>
+              <View style={styles.candidatesRow}>
+                {candidates.map((c) => (
+                  <TouchableOpacity
+                    key={c.id}
+                    style={[
+                      styles.candidateBtn,
+                      selectedFood?.id === c.id && styles.candidateBtnActive,
+                    ]}
+                    onPress={() => { setSelectedFood(c); setSaved(false); setQuantity(100); }}
+                  >
+                    <Text style={styles.candidateEmoji}>{c.emoji}</Text>
+                    <Text
+                      style={[
+                        styles.candidateName,
+                        selectedFood?.id === c.id && styles.candidateNameActive,
+                      ]}
+                      numberOfLines={2}
+                    >
+                      {c.name}
+                    </Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+            </View>
+          )}
+
+          {/* 수량 조절 */}
+          <View style={styles.quantityRow}>
+            <Text style={styles.quantityLabel}>섭취량</Text>
+            <View style={styles.quantityCtrl}>
+              <TouchableOpacity
+                style={styles.qBtn}
+                onPress={() => setQuantity(q => Math.max(100, q - 100))}
+              >
+                <Text style={styles.qBtnText}>−</Text>
+              </TouchableOpacity>
+              <Text style={styles.qVal}>{quantity}g</Text>
+              <TouchableOpacity
+                style={styles.qBtn}
+                onPress={() => setQuantity(q => q + 100)}
+              >
+                <Text style={styles.qBtnText}>+</Text>
+              </TouchableOpacity>
             </View>
           </View>
 
           <View style={styles.calorieRow}>
             <Text style={styles.calorieEmoji}>🔥</Text>
-            <Text style={styles.calorieText}>{n?.calories} kcal</Text>
+            <Text style={styles.calorieText}>{computedN?.calories} kcal</Text>
           </View>
 
           <View style={styles.nutriRow}>
-            <NutriBadge label="탄수화물" value={n?.carbs} unit="g" color="#F6A623" />
-            <NutriBadge label="단백질" value={n?.protein} unit="g" color="#2ECC71" />
-            <NutriBadge label="지방" value={n?.fat} unit="g" color="#9B59B6" />
-            <NutriBadge label="식이섬유" value={n?.fiber} unit="g" color="#1ABC9C" />
+            <NutriBadge label="탄수화물" value={computedN?.carbs} unit="g" color="#F6A623" />
+            <NutriBadge label="단백질" value={computedN?.protein} unit="g" color="#2ECC71" />
+            <NutriBadge label="지방" value={computedN?.fat} unit="g" color="#9B59B6" />
+            <NutriBadge label="식이섬유" value={computedN?.fiber} unit="g" color="#1ABC9C" />
           </View>
 
           {saved ? (
@@ -289,12 +525,70 @@ export default function UploadScreen({ route }: Props) {
               <Text style={styles.notFoundSub}>아직 등록되지 않은 음식입니다</Text>
             </View>
           ) : (
-            <TouchableOpacity style={styles.saveBtn} onPress={handleSave}>
-              <Text style={styles.saveBtnText}>{selectedMeal}에 추가하기 →</Text>
-            </TouchableOpacity>
+            <View style={{ gap: spacing.sm }}>
+              <TouchableOpacity style={styles.saveBtn} onPress={() => handleSave()}>
+                <Text style={styles.saveBtnText}>{selectedMeal}에 추가하기 →</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={styles.editNutriBtn} onPress={openEditNutri}>
+                <Text style={styles.editNutriBtnText}>✏️ 영양정보 수정 후 추가</Text>
+              </TouchableOpacity>
+            </View>
           )}
         </View>
       )}
+
+      <Modal visible={editNutriVisible} transparent animationType="slide" onRequestClose={() => setEditNutriVisible(false)}>
+        <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={{ flex: 1 }}>
+          <TouchableOpacity style={eStyles.backdrop} activeOpacity={1} onPress={() => setEditNutriVisible(false)} />
+          <View style={eStyles.sheet}>
+            <Text style={eStyles.title}>영양정보 수정</Text>
+            <Text style={eStyles.label}>칼로리 (kcal)</Text>
+            <TextInput style={eStyles.input} value={editCalories} onChangeText={setEditCalories} keyboardType="numeric" placeholderTextColor={colors.textLight} />
+            <View style={eStyles.row}>
+              <View style={{ flex: 1 }}>
+                <Text style={eStyles.label}>탄수화물 (g)</Text>
+                <TextInput style={eStyles.input} value={editCarbs} onChangeText={setEditCarbs} keyboardType="numeric" />
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text style={eStyles.label}>단백질 (g)</Text>
+                <TextInput style={eStyles.input} value={editProtein} onChangeText={setEditProtein} keyboardType="numeric" />
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text style={eStyles.label}>지방 (g)</Text>
+                <TextInput style={eStyles.input} value={editFat} onChangeText={setEditFat} keyboardType="numeric" />
+              </View>
+            </View>
+            <View style={eStyles.row}>
+              <View style={{ flex: 1 }}>
+                <Text style={eStyles.label}>식이섬유 (g)</Text>
+                <TextInput style={eStyles.input} value={editFiber} onChangeText={setEditFiber} keyboardType="numeric" />
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text style={eStyles.label}>당류 (g)</Text>
+                <TextInput style={eStyles.input} value={editSugar} onChangeText={setEditSugar} keyboardType="numeric" />
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text style={eStyles.label}>나트륨 (mg)</Text>
+                <TextInput style={eStyles.input} value={editSodium} onChangeText={setEditSodium} keyboardType="numeric" />
+              </View>
+            </View>
+            <TouchableOpacity style={eStyles.addBtn} onPress={() => handleSave({
+              calories: parseFloat(editCalories) || 0,
+              carbs: parseFloat(editCarbs) || 0,
+              protein: parseFloat(editProtein) || 0,
+              fat: parseFloat(editFat) || 0,
+              fiber: parseFloat(editFiber) || 0,
+              sugar: parseFloat(editSugar) || 0,
+              sodium: parseFloat(editSodium) || 0,
+            })}>
+              <Text style={eStyles.addBtnText}>{selectedMeal}에 추가하기 →</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={eStyles.cancelBtn} onPress={() => setEditNutriVisible(false)}>
+              <Text style={eStyles.cancelText}>취소</Text>
+            </TouchableOpacity>
+          </View>
+        </KeyboardAvoidingView>
+      </Modal>
 
       <View style={{ height: 40 }} />
     </ScrollView>
@@ -386,4 +680,91 @@ const styles = StyleSheet.create({
   },
   notFoundText: { color: '#E65100', fontSize: 15, fontWeight: '800' },
   notFoundSub: { color: '#BF360C', fontSize: 12, marginTop: 4 },
+  editNutriBtn: {
+    backgroundColor: colors.white, borderRadius: borderRadius.sm,
+    padding: spacing.md, alignItems: 'center',
+    borderWidth: 1.5, borderColor: colors.primary,
+  },
+  editNutriBtnText: { color: colors.primary, fontSize: 14, fontWeight: '700' },
+  quantityRow: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+    backgroundColor: colors.background, borderRadius: borderRadius.md,
+    padding: spacing.sm, marginBottom: spacing.md,
+  },
+  quantityLabel: { fontSize: 13, fontWeight: '700', color: colors.text },
+  quantityCtrl: { flexDirection: 'row', alignItems: 'center', gap: spacing.md },
+  qBtn: {
+    width: 36, height: 36, borderRadius: 18,
+    backgroundColor: colors.primary, justifyContent: 'center', alignItems: 'center',
+  },
+  qBtnText: { color: '#fff', fontSize: 20, fontWeight: '700', lineHeight: 24 },
+  qVal: { fontSize: 16, fontWeight: '800', color: colors.text, minWidth: 52, textAlign: 'center' },
+  candidatesBox: {
+    backgroundColor: colors.background, borderRadius: borderRadius.md,
+    padding: spacing.sm, marginBottom: spacing.md,
+  },
+  candidatesTitle: { fontSize: 12, fontWeight: '700', color: colors.textLight, marginBottom: spacing.sm },
+  candidatesRow: { flexDirection: 'row', gap: spacing.sm },
+  candidateBtn: {
+    flex: 1, alignItems: 'center', backgroundColor: colors.white,
+    borderRadius: borderRadius.md, padding: spacing.sm,
+    borderWidth: 1.5, borderColor: colors.border,
+  },
+  candidateBtnActive: { borderColor: colors.primary, backgroundColor: colors.primaryLight },
+  candidateEmoji: { fontSize: 24, marginBottom: 4 },
+  candidateName: { fontSize: 11, color: colors.textLight, textAlign: 'center', fontWeight: '600' },
+  candidateNameActive: { color: colors.primary },
+  manualBtn: {
+    backgroundColor: colors.white, borderRadius: borderRadius.md,
+    padding: spacing.md, alignItems: 'center', marginBottom: spacing.md,
+    borderWidth: 1.5, borderColor: colors.border, borderStyle: 'dashed',
+  },
+  manualBtnText: { color: colors.textLight, fontSize: 14, fontWeight: '700' },
+});
+
+const mStyles = StyleSheet.create({
+  backdrop: { flex: 1 },
+  sheet: {
+    backgroundColor: '#fff', borderTopLeftRadius: 24, borderTopRightRadius: 24,
+    padding: spacing.lg, paddingBottom: 40,
+  },
+  title: { fontSize: 18, fontWeight: '800', color: colors.text, textAlign: 'center', marginBottom: spacing.md },
+  label: { fontSize: 12, fontWeight: '600', color: colors.text, marginBottom: 4, marginTop: spacing.sm },
+  sectionLabel: { fontSize: 13, fontWeight: '700', color: colors.primary, marginTop: spacing.md, marginBottom: 0 },
+  input: {
+    borderWidth: 1.5, borderColor: colors.border, borderRadius: borderRadius.sm,
+    padding: spacing.sm, fontSize: 14, color: colors.text, backgroundColor: colors.background,
+  },
+  row: { flexDirection: 'row', gap: spacing.sm },
+  nutriRow: { flexDirection: 'row', gap: spacing.sm },
+  addBtn: {
+    backgroundColor: colors.primary, borderRadius: borderRadius.sm,
+    padding: spacing.md, alignItems: 'center', marginTop: spacing.lg,
+  },
+  addBtnText: { color: '#fff', fontSize: 15, fontWeight: '800' },
+  cancelBtn: { alignItems: 'center', marginTop: spacing.sm, padding: spacing.sm },
+  cancelText: { color: colors.textLight, fontSize: 14 },
+});
+
+const eStyles = StyleSheet.create({
+  backdrop: { flex: 1 },
+  sheet: {
+    backgroundColor: '#fff', borderTopLeftRadius: 24, borderTopRightRadius: 24,
+    padding: spacing.lg, paddingBottom: 40,
+  },
+  title: { fontSize: 18, fontWeight: '800', color: colors.text, textAlign: 'center', marginBottom: spacing.md },
+  label: { fontSize: 12, fontWeight: '600', color: colors.text, marginBottom: 4, marginTop: spacing.sm },
+  input: {
+    borderWidth: 1.5, borderColor: colors.border, borderRadius: borderRadius.sm,
+    padding: spacing.sm, fontSize: 14, color: colors.text, backgroundColor: colors.background,
+    textAlign: 'center',
+  },
+  row: { flexDirection: 'row', gap: spacing.sm },
+  addBtn: {
+    backgroundColor: colors.primary, borderRadius: borderRadius.sm,
+    padding: spacing.md, alignItems: 'center', marginTop: spacing.lg,
+  },
+  addBtnText: { color: '#fff', fontSize: 15, fontWeight: '800' },
+  cancelBtn: { alignItems: 'center', marginTop: spacing.sm, padding: spacing.sm },
+  cancelText: { color: colors.textLight, fontSize: 14 },
 });

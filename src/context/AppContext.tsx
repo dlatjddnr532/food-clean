@@ -38,12 +38,16 @@ export function calculateDailyGoals(profile: Partial<UserProfile>): DailyGoals {
   const adj = goalAdjust[goalType];
   const targetCal = Math.max(1200, tdee + adj.calAdj);
 
+  const sugarGoal: Record<GoalType, number> = { diet: 25, maintain: 40, muscle: 50 };
+
   return {
     calories: targetCal,
     carbs: Math.round((targetCal * adj.carbs) / 4),
     protein: Math.round((targetCal * adj.protein) / 4),
     fat: Math.round((targetCal * adj.fat) / 9),
     fiber: 25,
+    sugar: sugarGoal[goalType],
+    sodium: 2000,
   };
 }
 
