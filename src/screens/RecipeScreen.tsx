@@ -7,9 +7,10 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { colors, spacing, borderRadius, shadow } from '../utils/theme';
 import { useApp } from '../context/AppContext';
 import { DUMMY_RECIPES, DUMMY_FOODS, DUMMY_INGREDIENTS } from '../data/dummyData';
-import { Food, Recipe, MealType, NutritionInfo } from '../types';
+import { Food, Recipe, MealType, NutritionInfo, UserRecipe } from '../types';
+import { analyzeYoutubeRecipe } from '../api/diet';
 
-const TABS = ['즐겨찾기', '레시피', '재료·음식'] as const;
+const TABS = ['즐겨찾기', '레시피', '재료·음식', '나만의 레시피'] as const;
 const MEAL_TYPES: MealType[] = ['아침', '점심', '저녁', '간식'];
 
 // ── 영양소 미니 배지 ──
@@ -288,10 +289,16 @@ const modal = StyleSheet.create({
 
 export default function RecipeScreen() {
   const insets = useSafeAreaInsets();
-  const { addMealLog, favoriteIds, toggleFavorite, isFavorite } = useApp();
-  const [activeTab, setActiveTab] = useState<0 | 1 | 2>(0);
+  const { addMealLog, favoriteIds, toggleFavorite, isFavorite, userRecipes, addUserRecipe, removeUserRecipe } = useApp();
+  const [activeTab, setActiveTab] = useState<0 | 1 | 2 | 3>(0);
+
+  // ── 나만의 레시피 상태 ──
+  const [youtubeUrl, setYoutubeUrl] = useState('');
+  const [analyzing, setAnalyzing] = useState(false);
+  const [analyzedRecipe, setAnalyzedRecipe] = useState<UserRecipe | null>(null);
   const [searchText, setSearchText] = useState('');
   const [expandedId, setExpandedId] = useState<number | null>(null);
+  const [expandedUserRecipeId, setExpandedUserRecipeId] = useState<string | null>(null);
   const [modalItem, setModalItem] = useState<ModalItem | null>(null);
   const [selectedIngredients, setSelectedIngredients] = useState<string[]>([]);
   const recipeListRef = useRef<FlatList>(null);
@@ -403,6 +410,18 @@ export default function RecipeScreen() {
 
         {isExpanded && (
           <View style={styles.expandedArea}>
+            {item.tools && item.tools.length > 0 && (
+              <>
+                <Text style={styles.expandTitle}>🍳 조리도구</Text>
+                <View style={styles.toolsRow}>
+                  {item.tools.map((tool) => (
+                    <View key={tool} style={styles.toolChip}>
+                      <Text style={styles.toolChipText}>{tool}</Text>
+                    </View>
+                  ))}
+                </View>
+              </>
+            )}
             <Text style={styles.expandTitle}>📋 재료</Text>
             {item.ingredients.map((ing) => (
               <View key={ing.name} style={styles.ingRow}>
@@ -463,23 +482,92 @@ export default function RecipeScreen() {
     );
   };
 
+  // ── 유튜브 레시피 분석 ──
+  const handleAnalyzeYoutube = async () => {
+    if (!youtubeUrl.trim()) {
+      Alert.alert('URL 입력', '유튜브 URL을 입력해주세요.');
+      return;
+    }
+    const isYoutube = youtubeUrl.includes('youtube.com') || youtubeUrl.includes('youtu.be');
+    if (!isYoutube) {
+      Alert.alert('잘못된 URL', '유튜브 URL만 지원해요.\n예: https://youtube.com/watch?v=...');
+      return;
+    }
+
+    setAnalyzing(true);
+    setAnalyzedRecipe(null);
+
+    try {
+      const res = await analyzeYoutubeRecipe(youtubeUrl.trim());
+
+      if (res.success && res.recipe) {
+        const newRecipe: UserRecipe = {
+          ...res.recipe,
+          id: String(Date.now()),
+          youtubeUrl: youtubeUrl.trim(),
+          createdAt: new Date().toLocaleDateString('ko-KR'),
+        };
+        setAnalyzedRecipe(newRecipe);
+      } else {
+        // 백엔드 미연결 → 더미 결과로 미리보기
+        const dummyRecipe: UserRecipe = {
+          id: String(Date.now()),
+          title: '분석된 레시피',
+          emoji: '🍳',
+          category: '나만의 요리',
+          cookTime: 30,
+          servings: 2,
+          youtubeUrl: youtubeUrl.trim(),
+          ingredients: [
+            { name: '닭가슴살', amount: '200g' },
+            { name: '양상추', amount: '100g' },
+            { name: '방울토마토', amount: '50g' },
+            { name: '올리브오일', amount: '1스푼' },
+          ],
+          steps: [
+            '닭가슴살을 소금, 후추로 밑간한다.',
+            '팬에 올리브오일을 두르고 닭가슴살을 굽는다.',
+            '양상추와 방울토마토를 썰어 준비한다.',
+            '구운 닭가슴살을 얹어 완성한다.',
+          ],
+          totalNutrition: { calories: 320, carbs: 12, protein: 42, fat: 11, fiber: 3, sugar: 5, sodium: 480 },
+          createdAt: new Date().toLocaleDateString('ko-KR'),
+        };
+        setAnalyzedRecipe(dummyRecipe);
+        Alert.alert('미리보기 모드', '백엔드가 아직 연결되지 않아 예시 레시피를 보여드려요.\n실제 분석은 백엔드 연결 후 작동해요!');
+      }
+    } catch {
+      Alert.alert('오류', '분석 중 문제가 생겼어요. 다시 시도해주세요.');
+    } finally {
+      setAnalyzing(false);
+    }
+  };
+
+  const handleSaveUserRecipe = () => {
+    if (!analyzedRecipe) return;
+    addUserRecipe(analyzedRecipe);
+    setAnalyzedRecipe(null);
+    setYoutubeUrl('');
+    Alert.alert('저장 완료! ✅', `"${analyzedRecipe.title}" 레시피가 저장됐어요.`);
+  };
+
   return (
     <View style={styles.container}>
       <View style={[styles.header, { paddingTop: spacing.xl + insets.top }]}>
         <Text style={styles.headerTitle}>음식 검색 🔍</Text>
-        <View style={styles.tabRow}>
+        <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.tabRow} contentContainerStyle={styles.tabRowContent}>
           {TABS.map((t, i) => (
             <TouchableOpacity
               key={t}
               style={[styles.tab, activeTab === i && styles.tabActive]}
-              onPress={() => setActiveTab(i as 0 | 1 | 2)}
+              onPress={() => setActiveTab(i as 0 | 1 | 2 | 3)}
             >
               <Text style={[styles.tabText, activeTab === i && styles.tabTextActive]}>
-                {t === '즐겨찾기' ? `❤️ ${t}${favoriteIds.length > 0 ? ` (${favoriteIds.length})` : ''}` : t}
+                {t === '즐겨찾기' ? `❤️ ${t}${favoriteIds.length > 0 ? ` (${favoriteIds.length})` : ''}` : t === '나만의 레시피' ? `📹 ${t}` : t}
               </Text>
             </TouchableOpacity>
           ))}
-        </View>
+        </ScrollView>
         <View style={styles.searchBar}>
           <Text style={styles.searchIcon}>🔍</Text>
           <TextInput
@@ -527,7 +615,7 @@ export default function RecipeScreen() {
           }}
           ListEmptyComponent={<Text style={styles.emptyText}>검색 결과가 없어요 😅</Text>}
         />
-      ) : (
+      ) : activeTab === 2 ? (
         <FlatList
           data={filteredIngredients}
           keyExtractor={(item) => `ing-${item.id}`}
@@ -587,6 +675,152 @@ export default function RecipeScreen() {
           }
           ListEmptyComponent={<Text style={styles.emptyText}>검색 결과가 없어요 😅</Text>}
         />
+      ) : (
+        /* ── 나만의 레시피 탭 ── */
+        <ScrollView style={{ flex: 1 }} contentContainerStyle={styles.list} showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled">
+          {/* URL 입력 카드 */}
+          <View style={styles.youtubeCard}>
+            <Text style={styles.youtubeTitle}>📹 유튜브 레시피 가져오기</Text>
+            <Text style={styles.youtubeSub}>유튜브 영상 URL을 붙여넣으면{'\n'}AI가 레시피를 자동으로 분석해드려요!</Text>
+            <View style={styles.urlInputRow}>
+              <TextInput
+                style={styles.urlInput}
+                placeholder="https://youtube.com/watch?v=..."
+                placeholderTextColor={colors.textLight}
+                value={youtubeUrl}
+                onChangeText={setYoutubeUrl}
+                autoCapitalize="none"
+                autoCorrect={false}
+              />
+              {youtubeUrl ? (
+                <TouchableOpacity onPress={() => setYoutubeUrl('')}>
+                  <Text style={styles.clearBtn}>✕</Text>
+                </TouchableOpacity>
+              ) : null}
+            </View>
+            <TouchableOpacity
+              style={[styles.analyzeBtn, analyzing && styles.analyzeBtnDisabled]}
+              onPress={handleAnalyzeYoutube}
+              disabled={analyzing}
+            >
+              <Text style={styles.analyzeBtnText}>
+                {analyzing ? '🔍 분석 중...' : '🤖 레시피 분석하기'}
+              </Text>
+            </TouchableOpacity>
+          </View>
+
+          {/* 분석 결과 미리보기 */}
+          {analyzedRecipe && (
+            <View style={styles.analyzedCard}>
+              <View style={styles.analyzedHeader}>
+                <Text style={styles.analyzedEmoji}>{analyzedRecipe.emoji}</Text>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.analyzedTitle}>{analyzedRecipe.title}</Text>
+                  <Text style={styles.analyzedMeta}>⏱️ {analyzedRecipe.cookTime}분 · 🍽 {analyzedRecipe.servings}인분 · {analyzedRecipe.category}</Text>
+                </View>
+              </View>
+
+              <View style={styles.nutritionRow}>
+                <NutriBadge label="칼로리" value={analyzedRecipe.totalNutrition.calories} color="#E74C3C" unit="kcal" />
+                <NutriBadge label="탄수화물" value={analyzedRecipe.totalNutrition.carbs} color="#F6A623" />
+                <NutriBadge label="단백질" value={analyzedRecipe.totalNutrition.protein} color="#2ECC71" />
+                <NutriBadge label="지방" value={analyzedRecipe.totalNutrition.fat} color="#9B59B6" />
+              </View>
+
+              <Text style={styles.sectionLabel}>📋 재료</Text>
+              {analyzedRecipe.ingredients.map((ing, i) => (
+                <Text key={i} style={styles.ingItem}>• {ing.name} {ing.amount}</Text>
+              ))}
+
+              <Text style={styles.sectionLabel}>👨‍🍳 조리 방법</Text>
+              {analyzedRecipe.steps.map((step, i) => (
+                <Text key={i} style={styles.stepItem}>{i + 1}. {step}</Text>
+              ))}
+
+              <View style={styles.analyzedActions}>
+                <TouchableOpacity style={styles.discardBtn} onPress={() => setAnalyzedRecipe(null)}>
+                  <Text style={styles.discardBtnText}>다시 분석</Text>
+                </TouchableOpacity>
+                <TouchableOpacity style={styles.saveRecipeBtn} onPress={handleSaveUserRecipe}>
+                  <Text style={styles.saveRecipeBtnText}>💾 저장하기</Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+          )}
+
+          {/* 저장된 레시피 목록 */}
+          <Text style={styles.savedTitle}>저장된 레시피 {userRecipes.length}개</Text>
+          {userRecipes.length === 0 ? (
+            <View style={styles.emptyUser}>
+              <Text style={styles.emptyUserEmoji}>📋</Text>
+              <Text style={styles.emptyUserText}>아직 저장된 레시피가 없어요{'\n'}유튜브 URL을 붙여넣어 레시피를 가져와보세요!</Text>
+            </View>
+          ) : (
+            <>
+              {userRecipes.map((r) => {
+                const isExpanded = expandedUserRecipeId === r.id;
+                const n = r.totalNutrition;
+                const asFood: Food = {
+                  id: 0, name: r.title, emoji: r.emoji,
+                  category: r.category, per: `${r.servings}인분`,
+                  nutrition: n,
+                };
+                return (
+                  <View key={r.id} style={styles.card}>
+                    <TouchableOpacity
+                      style={styles.cardHeader}
+                      onPress={() => setExpandedUserRecipeId(isExpanded ? null : r.id)}
+                      activeOpacity={0.85}
+                    >
+                      <View style={styles.cardLeft}>
+                        <Text style={styles.cardEmoji}>{r.emoji}</Text>
+                      </View>
+                      <View style={styles.cardBody}>
+                        <View style={styles.cardTitleRow}>
+                          <Text style={styles.cardTitle}>{r.title}</Text>
+                          <TouchableOpacity onPress={() => Alert.alert('삭제', `${r.title} 삭제할까요?`, [
+                            { text: '취소', style: 'cancel' },
+                            { text: '삭제', style: 'destructive', onPress: () => removeUserRecipe(r.id) },
+                          ])}>
+                            <Text style={{ fontSize: 18 }}>🗑️</Text>
+                          </TouchableOpacity>
+                        </View>
+                        <Text style={styles.cardMeta}>⏱️ {r.cookTime}분 · {r.category} · {r.servings}인분 기준</Text>
+                        <Text style={styles.cardCal}>🔥 {n.calories} kcal</Text>
+                        <View style={styles.miniNutriRow}>
+                          <NutriBadge label="탄" value={n.carbs} color="#F6A623" />
+                          <NutriBadge label="단" value={n.protein} color="#2ECC71" />
+                          <NutriBadge label="지" value={n.fat} color="#9B59B6" />
+                          {n.fiber != null && <NutriBadge label="섬유" value={n.fiber} color="#1ABC9C" />}
+                          {n.sugar != null && <NutriBadge label="당" value={n.sugar} color="#E74C3C" />}
+                          {n.sodium != null && <NutriBadge label="나트륨" value={n.sodium} color="#E67E22" unit="mg" />}
+                        </View>
+                      </View>
+                    </TouchableOpacity>
+
+                    {isExpanded && (
+                      <View style={styles.expandedArea}>
+                        <Text style={styles.expandTitle}>📋 재료</Text>
+                        {r.ingredients.map((ing, i) => (
+                          <View key={i} style={styles.ingRow}>
+                            <Text style={styles.ingName}>• {ing.name} ({ing.amount})</Text>
+                          </View>
+                        ))}
+                        <Text style={[styles.expandTitle, { marginTop: spacing.sm }]}>👨‍🍳 조리 방법</Text>
+                        {r.steps.map((step, i) => (
+                          <Text key={i} style={styles.stepText}>{i + 1}. {step}</Text>
+                        ))}
+                        <TouchableOpacity style={styles.addBtn} onPress={() => setModalItem(asFood)}>
+                          <Text style={styles.addBtnText}>+ 식단에 추가하기</Text>
+                        </TouchableOpacity>
+                      </View>
+                    )}
+                  </View>
+                );
+              })}
+            </>
+          )}
+        </ScrollView>
       )}
 
       <AddMealModal
@@ -607,10 +841,11 @@ const styles = StyleSheet.create({
   },
   headerTitle: { fontSize: 22, fontWeight: '800', color: colors.text },
   tabRow: {
-    flexDirection: 'row', marginTop: spacing.sm,
+    marginTop: spacing.sm,
     backgroundColor: colors.background, borderRadius: borderRadius.full, padding: 3,
   },
-  tab: { flex: 1, paddingVertical: spacing.xs + 2, borderRadius: borderRadius.full, alignItems: 'center' },
+  tabRowContent: { flexDirection: 'row', alignItems: 'center' },
+  tab: { paddingVertical: spacing.xs + 2, paddingHorizontal: spacing.md, borderRadius: borderRadius.full, alignItems: 'center' },
   tabActive: { backgroundColor: colors.white, ...shadow.small },
   tabText: { fontSize: 13, fontWeight: '600', color: colors.textLight },
   tabTextActive: { color: colors.primary },
@@ -711,4 +946,60 @@ const styles = StyleSheet.create({
   emptyFavIcon: { fontSize: 52, marginBottom: spacing.md },
   emptyFavTitle: { fontSize: 18, fontWeight: '800', color: colors.text, marginBottom: spacing.sm },
   emptyFavSub: { fontSize: 14, color: colors.textLight, textAlign: 'center' },
+
+  // ── 나만의 레시피 탭 ──
+  youtubeCard: {
+    backgroundColor: colors.white, borderRadius: borderRadius.lg,
+    padding: spacing.lg, marginBottom: spacing.md, ...shadow.small,
+  },
+  youtubeTitle: { fontSize: 16, fontWeight: '800', color: colors.text, marginBottom: spacing.xs },
+  youtubeSub: { fontSize: 12, color: colors.textLight, marginBottom: spacing.md, lineHeight: 18 },
+  urlInputRow: {
+    flexDirection: 'row', alignItems: 'center',
+    borderWidth: 1.5, borderColor: colors.border, borderRadius: borderRadius.sm,
+    paddingHorizontal: spacing.sm, marginBottom: spacing.md, backgroundColor: colors.background,
+  },
+  urlInput: { flex: 1, fontSize: 13, color: colors.text, paddingVertical: spacing.md },
+  analyzeBtn: {
+    backgroundColor: '#FF0000', borderRadius: borderRadius.sm,
+    padding: spacing.md, alignItems: 'center',
+  },
+  analyzeBtnDisabled: { backgroundColor: colors.textLight },
+  analyzeBtnText: { color: '#fff', fontSize: 15, fontWeight: '800' },
+
+  analyzedCard: {
+    backgroundColor: colors.white, borderRadius: borderRadius.lg,
+    padding: spacing.lg, marginBottom: spacing.md, ...shadow.small,
+  },
+  analyzedHeader: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm, marginBottom: spacing.md },
+  analyzedEmoji: { fontSize: 36 },
+  analyzedTitle: { fontSize: 16, fontWeight: '800', color: colors.text },
+  analyzedMeta: { fontSize: 12, color: colors.textLight, marginTop: 2 },
+  nutritionRow: { flexDirection: 'row', gap: spacing.xs, flexWrap: 'wrap', marginBottom: spacing.md },
+  sectionLabel: { fontSize: 13, fontWeight: '700', color: colors.text, marginBottom: spacing.xs, marginTop: spacing.sm },
+  ingItem: { fontSize: 13, color: colors.text, paddingVertical: 3 },
+  stepItem: { fontSize: 13, color: colors.text, paddingVertical: 4, lineHeight: 20 },
+  analyzedActions: { flexDirection: 'row', gap: spacing.sm, marginTop: spacing.lg },
+  discardBtn: {
+    flex: 1, borderRadius: borderRadius.sm, padding: spacing.md, alignItems: 'center',
+    borderWidth: 1.5, borderColor: colors.border,
+  },
+  discardBtnText: { color: colors.textLight, fontSize: 14, fontWeight: '700' },
+  saveRecipeBtn: {
+    flex: 2, backgroundColor: colors.primary, borderRadius: borderRadius.sm,
+    padding: spacing.md, alignItems: "center",
+  },
+  saveRecipeBtnText: { color: "#fff", fontSize: 14, fontWeight: "800" },
+
+  toolsRow: { flexDirection: 'row', flexWrap: 'wrap', gap: spacing.xs, marginBottom: spacing.sm },
+  toolChip: {
+    backgroundColor: colors.primary + '18', borderRadius: borderRadius.full,
+    paddingHorizontal: spacing.sm, paddingVertical: 4,
+    borderWidth: 1, borderColor: colors.primary + '40',
+  },
+  toolChipText: { fontSize: 12, color: colors.primary, fontWeight: '600' },
+  savedTitle: { fontSize: 15, fontWeight: "800", color: colors.text, marginBottom: spacing.sm },
+  emptyUser: { alignItems: "center", paddingVertical: spacing.xl },
+  emptyUserEmoji: { fontSize: 40, marginBottom: spacing.sm },
+  emptyUserText: { fontSize: 13, color: colors.textLight, textAlign: "center", lineHeight: 20 },
 });

@@ -1,17 +1,7 @@
 // ============================================================
-// 공유 타입 정의 — 백엔드 엔티티 기반
+// 공유 타입 정의
 // ============================================================
 
-// 백엔드 user.entity.ts 기반
-export interface BackendUser {
-  id: string; // uuid
-  email: string;
-  nickname: string;
-  goal_calories: number;
-  goal_macros: { c: number; p: number; f: number };
-}
-
-// 백엔드 meal-log.entity.ts 기반
 export type MealType = '아침' | '점심' | '저녁' | '간식';
 
 export interface BackendMealLog {
@@ -22,7 +12,6 @@ export interface BackendMealLog {
   total_nutrients: NutritionInfo;
 }
 
-// ── 영양소 ──
 export interface NutritionInfo {
   calories: number;
   carbs: number;
@@ -33,7 +22,6 @@ export interface NutritionInfo {
   sodium?: number;
 }
 
-// ── 음식/재료 ──
 export interface Food {
   id: number;
   name: string;
@@ -44,7 +32,6 @@ export interface Food {
   type?: 'food' | 'ingredient';
 }
 
-// ── 레시피 ──
 export interface RecipeIngredient {
   name: string;
   amount: string;
@@ -66,7 +53,6 @@ export interface Recipe {
   foodId: number;
 }
 
-// ── 사용자 프로필 (프론트 전용) ──
 export type Gender = 'male' | 'female';
 export type ActivityLevel = 'sedentary' | 'light' | 'moderate' | 'active';
 export type GoalType = 'diet' | 'maintain' | 'muscle';
@@ -89,7 +75,6 @@ export interface AppUser {
   profile: UserProfile;
 }
 
-// ── 1일 권장량 ──
 export interface DailyGoals {
   calories: number;
   carbs: number;
@@ -100,7 +85,6 @@ export interface DailyGoals {
   sodium: number;
 }
 
-// ── 식단 기록 (프론트 전용) ──
 export interface MealLogEntry {
   id: number;
   userId: number;
@@ -109,7 +93,25 @@ export interface MealLogEntry {
   food: Food;
 }
 
-// ── AI 분석 결과 ──
+export interface UserRecipeIngredient {
+  name: string;
+  amount: string;
+}
+
+export interface UserRecipe {
+  id: string;
+  title: string;
+  emoji: string;
+  category: string;
+  cookTime: number;
+  servings: number;
+  youtubeUrl: string;
+  ingredients: UserRecipeIngredient[];
+  steps: string[];
+  totalNutrition: NutritionInfo;
+  createdAt: string;
+}
+
 export interface AiFoodResult {
   name: string;
   confidence: number;
@@ -121,7 +123,6 @@ export interface AiAnalysisResult {
   food: Food;
 }
 
-// ── Context 타입 ──
 export interface AppContextType {
   isLoggedIn: boolean;
   currentUser: AppUser | null;
@@ -134,16 +135,16 @@ export interface AppContextType {
   todayLogs: MealLogEntry[];
   addMealLog: (mealType: MealType, food: Food) => MealLogEntry;
   removeMealLog: (logId: number) => void;
-  // 즐겨찾기
   favoriteIds: number[];
   toggleFavorite: (recipeId: number) => void;
   isFavorite: (recipeId: number) => boolean;
-  // 물 섭취
   todayWater: number;
   addWater: (amount: number) => void;
   resetWater: () => void;
-  // 주간 칼로리
   weeklyCalories: { day: string; calories: number }[];
+  userRecipes: UserRecipe[];
+  addUserRecipe: (recipe: UserRecipe) => void;
+  removeUserRecipe: (id: string) => void;
 }
 
 export interface SignupData {

@@ -1,7 +1,8 @@
 import React, { useState } from 'react';
 import {
-  View, Text, ScrollView, StyleSheet, TouchableOpacity,
+  View, Text, ScrollView, StyleSheet, TouchableOpacity, Modal,
 } from 'react-native';
+import CalendarScreen from './CalendarScreen';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { BottomTabNavigationProp } from '@react-navigation/bottom-tabs';
 import { colors, spacing, borderRadius, shadow } from '../utils/theme';
@@ -209,10 +210,155 @@ const waterStyles = StyleSheet.create({
   addBtnText: { fontSize: 13, color: '#3498DB', fontWeight: '700' },
 });
 
+// ── AI 평가 생성 함수 ──
+function generateEvaluation(
+  totals: { calories: number; carbs: number; protein: number; fat: number; fiber: number; sugar: number; sodium: number },
+  goals: { calories: number; carbs: number; protein: number; fat: number; fiber: number; sugar: number; sodium: number },
+  foods: string[],
+) {
+  if (foods.length === 0) {
+    return {
+      score: 0, grade: '-', gradeColor: '#999',
+      summary: '오늘 아직 식단 기록이 없어요 😴',
+      details: [] as { emoji: string; text: string }[],
+      advice: '아침부터 균형 잡힌 식사를 기록해보세요!',
+    };
+  }
+
+  let score = 100;
+  const details: { emoji: string; text: string }[] = [];
+
+  const calR = totals.calories / (goals.calories || 1);
+  const proR = totals.protein / (goals.protein || 1);
+  const fatR = totals.fat / (goals.fat || 1);
+  const fibR = totals.fiber / (goals.fiber || 1);
+  const sugR = totals.sugar / (goals.sugar || 1);
+  const sodR = totals.sodium / (goals.sodium || 1);
+
+  // 칼로리
+  if (calR > 1.15) { score -= 20; details.push({ emoji: '⚠️', text: `칼로리 ${totals.calories - goals.calories}kcal 초과됐어요` }); }
+  else if (calR < 0.65) { score -= 10; details.push({ emoji: '📉', text: `칼로리가 목표의 ${Math.round(calR * 100)}%에 그쳤어요. 더 드세요!` }); }
+  else { details.push({ emoji: '✅', text: `칼로리 섭취가 적절해요 (${totals.calories}/${goals.calories}kcal)` }); }
+
+  // 단백질
+  if (proR < 0.65) { score -= 15; details.push({ emoji: '💪', text: `단백질이 부족해요! 닭가슴살·달걀·두부를 추가해보세요` }); }
+  else if (proR >= 0.9) { details.push({ emoji: '✅', text: `단백질 섭취 충분해요! (${totals.protein}g)` }); }
+  else { details.push({ emoji: '🔶', text: `단백질을 조금 더 보충하면 좋겠어요 (${totals.protein}/${goals.protein}g)` }); }
+
+  // 지방
+  if (fatR > 1.3) { score -= 10; details.push({ emoji: '🧈', text: `지방이 많아요. 튀긴 음식·버터를 줄여보세요` }); }
+  else if (fatR <= 1.0) { details.push({ emoji: '✅', text: `지방 섭취가 적절해요` }); }
+
+  // 식이섬유
+  if (fibR < 0.5) { score -= 10; details.push({ emoji: '🥗', text: `식이섬유가 부족해요. 채소·과일·통곡물을 더 드세요` }); }
+  else if (fibR >= 0.85) { details.push({ emoji: '✅', text: `식이섬유 섭취가 훌륭해요!` }); }
+
+  // 당류
+  if (sugR > 1.2) { score -= 15; details.push({ emoji: '🍭', text: `당류가 과다 섭취됐어요. 단 음식·음료를 줄여보세요` }); }
+  else { details.push({ emoji: '✅', text: `당류 섭취가 양호해요` }); }
+
+  // 나트륨
+  if (sodR > 1.2) { score -= 10; details.push({ emoji: '🧂', text: `나트륨이 많아요. 짠 음식·국물을 줄여보세요` }); }
+
+  score = Math.max(0, Math.min(100, score));
+
+  const grade = score >= 90 ? 'A+' : score >= 80 ? 'A' : score >= 70 ? 'B' : score >= 60 ? 'C' : 'D';
+  const gradeColor = score >= 80 ? '#2ECC71' : score >= 60 ? '#F6A623' : '#E74C3C';
+
+  const adviceList = [
+    proR < 0.7 ? '단백질 보충을 위해 저녁에 달걀이나 두부 요리를 추가해보세요.' : null,
+    fibR < 0.6 ? '식이섬유를 늘리려면 샐러드나 과일을 간식으로 드세요.' : null,
+    sugR > 1.1 ? '내일은 설탕이 들어간 음료·과자를 피해보세요.' : null,
+    sodR > 1.1 ? '나트륨 배출을 위해 물을 충분히 마셔보세요.' : null,
+    score >= 85 ? '오늘 식단 관리 정말 잘 하셨어요! 내일도 이렇게 유지해보세요 💪' : null,
+  ].filter(Boolean) as string[];
+
+  const advice = adviceList[0] ?? '균형 잡힌 식단을 위해 다양한 식품군을 골고루 드세요!';
+
+  return { score, grade, gradeColor, summary: `오늘 ${foods.length}가지 식품을 드셨어요`, details, advice };
+}
+
+// ── AI 평가 모달 ──
+function AiEvalModal({ visible, onClose, result }: {
+  visible: boolean;
+  onClose: () => void;
+  result: ReturnType<typeof generateEvaluation> | null;
+}) {
+  if (!result) return null;
+  return (
+    <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
+      <View style={evalStyles.backdrop}>
+        <View style={evalStyles.sheet}>
+          <View style={evalStyles.handle} />
+          <Text style={evalStyles.title}>🤖 AI 식단 평가</Text>
+
+          {/* 점수 */}
+          <View style={evalStyles.scoreBox}>
+            <Text style={[evalStyles.grade, { color: result.gradeColor }]}>{result.grade}</Text>
+            <Text style={[evalStyles.score, { color: result.gradeColor }]}>{result.score}점</Text>
+            <Text style={evalStyles.scoreSub}>{result.summary}</Text>
+          </View>
+
+          {/* 항목별 평가 */}
+          <ScrollView style={{ maxHeight: 260 }} showsVerticalScrollIndicator={false}>
+            {result.details.map((d, i) => (
+              <View key={i} style={evalStyles.detailRow}>
+                <Text style={evalStyles.detailEmoji}>{d.emoji}</Text>
+                <Text style={evalStyles.detailText}>{d.text}</Text>
+              </View>
+            ))}
+          </ScrollView>
+
+          {/* 조언 */}
+          <View style={evalStyles.adviceBox}>
+            <Text style={evalStyles.adviceLabel}>💡 오늘의 조언</Text>
+            <Text style={evalStyles.adviceText}>{result.advice}</Text>
+          </View>
+
+          <TouchableOpacity style={evalStyles.closeBtn} onPress={onClose}>
+            <Text style={evalStyles.closeBtnText}>확인</Text>
+          </TouchableOpacity>
+        </View>
+      </View>
+    </Modal>
+  );
+}
+
+const evalStyles = StyleSheet.create({
+  backdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.45)', justifyContent: 'flex-end' },
+  sheet: {
+    backgroundColor: '#fff', borderTopLeftRadius: 24, borderTopRightRadius: 24,
+    padding: spacing.lg, paddingBottom: spacing.xl,
+  },
+  handle: { width: 40, height: 4, backgroundColor: colors.border, borderRadius: 2, alignSelf: 'center', marginBottom: spacing.md },
+  title: { fontSize: 18, fontWeight: '800', color: colors.text, textAlign: 'center', marginBottom: spacing.md },
+  scoreBox: { alignItems: 'center', paddingVertical: spacing.md, marginBottom: spacing.md },
+  grade: { fontSize: 56, fontWeight: '900', lineHeight: 60 },
+  score: { fontSize: 20, fontWeight: '800', marginTop: 4 },
+  scoreSub: { fontSize: 13, color: colors.textLight, marginTop: 6 },
+  detailRow: { flexDirection: 'row', alignItems: 'flex-start', gap: spacing.sm, marginBottom: spacing.sm },
+  detailEmoji: { fontSize: 16, width: 22 },
+  detailText: { flex: 1, fontSize: 13, color: colors.text, lineHeight: 20 },
+  adviceBox: {
+    backgroundColor: colors.primaryLight, borderRadius: borderRadius.md,
+    padding: spacing.md, marginTop: spacing.sm, marginBottom: spacing.md,
+  },
+  adviceLabel: { fontSize: 12, fontWeight: '700', color: colors.primary, marginBottom: 4 },
+  adviceText: { fontSize: 13, color: colors.text, lineHeight: 20 },
+  closeBtn: {
+    backgroundColor: colors.primary, borderRadius: borderRadius.full,
+    padding: spacing.md, alignItems: 'center',
+  },
+  closeBtnText: { color: '#fff', fontSize: 15, fontWeight: '800' },
+});
+
 export default function HomeScreen({ navigation }: Props) {
   const insets = useSafeAreaInsets();
   const { currentUser, todayLogs, dailyGoals, removeMealLog, weeklyCalories, todayWater, addWater, resetWater } = useApp();
   const name = currentUser?.profile?.name ?? '사용자';
+  const [calendarVisible, setCalendarVisible] = useState(false);
+  const [evalVisible, setEvalVisible] = useState(false);
+  const [evalResult, setEvalResult] = useState<ReturnType<typeof generateEvaluation> | null>(null);
 
   const totals = todayLogs.reduce(
     (acc, log) => {
@@ -253,13 +399,24 @@ export default function HomeScreen({ navigation }: Props) {
             })}
           </Text>
         </View>
-        <TouchableOpacity
-          style={styles.profileBtn}
-          onPress={() => navigation.navigate('Profile')}
-        >
-          <Text style={styles.profileEmoji}>👤</Text>
-        </TouchableOpacity>
+        <View style={styles.headerBtns}>
+          <TouchableOpacity
+            style={styles.headerIconBtn}
+            onPress={() => setCalendarVisible(true)}
+          >
+            <Text style={styles.headerIconEmoji}>📅</Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={styles.profileBtn}
+            onPress={() => navigation.navigate('Profile')}
+          >
+            <Text style={styles.profileEmoji}>👤</Text>
+          </TouchableOpacity>
+        </View>
       </View>
+
+      {/* 달력 모달 */}
+      <CalendarScreen visible={calendarVisible} onClose={() => setCalendarVisible(false)} />
 
       {/* 칼로리 카드 */}
       <View style={[styles.calorieCard, calOver && styles.calorieCardOver]}>
@@ -311,13 +468,33 @@ export default function HomeScreen({ navigation }: Props) {
         </Text>
       </View>
 
+      {/* AI 평가 버튼 */}
+      <TouchableOpacity
+        style={styles.aiEvalBtn}
+        onPress={() => {
+          const foods = todayLogs.map((l) => l.food?.name).filter(Boolean) as string[];
+          setEvalResult(generateEvaluation(totals, dailyGoals, foods));
+          setEvalVisible(true);
+        }}
+      >
+        <Text style={styles.aiEvalEmoji}>🤖</Text>
+        <View style={{ flex: 1 }}>
+          <Text style={styles.aiEvalTitle}>오늘 식단 AI 평가받기</Text>
+          <Text style={styles.aiEvalSub}>오늘 먹은 것들을 분석해드려요</Text>
+        </View>
+        <Text style={styles.aiEvalArrow}>→</Text>
+      </TouchableOpacity>
+
+      {/* AI 평가 모달 */}
+      <AiEvalModal visible={evalVisible} onClose={() => setEvalVisible(false)} result={evalResult} />
+
       {/* 오늘의 식사 */}
       <View style={styles.section}>
         <View style={styles.sectionHeader}>
           <Text style={styles.sectionTitle}>오늘의 식사</Text>
         </View>
 
-        {/* 식단 추가 버튼 (하나로 통합) */}
+        {/* 식단 추가 버튼 */}
         <TouchableOpacity
           style={styles.bigAddBtn}
           onPress={() => navigation.navigate('Upload', {})}
@@ -385,6 +562,12 @@ const styles = StyleSheet.create({
   },
   greeting: { fontSize: 20, fontWeight: '800', color: colors.text },
   date: { fontSize: 13, color: colors.textLight, marginTop: 2 },
+  headerBtns: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm },
+  headerIconBtn: {
+    width: 42, height: 42, borderRadius: 21,
+    backgroundColor: colors.primaryLight, justifyContent: 'center', alignItems: 'center',
+  },
+  headerIconEmoji: { fontSize: 20 },
   profileBtn: {
     width: 42, height: 42, borderRadius: 21,
     backgroundColor: colors.primaryLight, justifyContent: 'center', alignItems: 'center',
@@ -412,6 +595,16 @@ const styles = StyleSheet.create({
     padding: spacing.lg, ...shadow.small,
   },
   goalHint: { fontSize: 11, color: colors.textLight, marginTop: spacing.sm, textAlign: 'center' },
+  aiEvalBtn: {
+    flexDirection: 'row', alignItems: 'center', gap: spacing.md,
+    marginHorizontal: spacing.lg, marginBottom: spacing.md,
+    backgroundColor: '#1a1a2e', borderRadius: borderRadius.lg,
+    padding: spacing.md, ...shadow.small,
+  },
+  aiEvalEmoji: { fontSize: 28 },
+  aiEvalTitle: { fontSize: 15, fontWeight: '800', color: '#fff' },
+  aiEvalSub: { fontSize: 12, color: 'rgba(255,255,255,0.6)', marginTop: 2 },
+  aiEvalArrow: { fontSize: 18, color: 'rgba(255,255,255,0.5)' },
   section: { paddingHorizontal: spacing.lg, paddingBottom: spacing.md },
   sectionHeader: {
     flexDirection: 'row', justifyContent: 'space-between',
@@ -456,3 +649,4 @@ const styles = StyleSheet.create({
   },
   deleteBtnText: { fontSize: 12, color: '#E74C3C', fontWeight: '700' },
 });
+
