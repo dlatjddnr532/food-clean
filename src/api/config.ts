@@ -1,8 +1,6 @@
 import axios, { AxiosInstance } from 'axios';
 
-// ⚠️ 백엔드 담당자한테 IP 주소 받아서 여기 수정하세요!
-// 예: 'http://192.168.0.10:3000'
-const BASE_URL = 'http://192.168.0.25:3000';
+const BASE_URL = 'https://food-dq5i.onrender.com';
 
 const api: AxiosInstance = axios.create({
   baseURL: BASE_URL,

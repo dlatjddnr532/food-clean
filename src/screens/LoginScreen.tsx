@@ -29,14 +29,10 @@ export default function LoginScreen({ navigation }: Props) {
       return;
     }
     setLoading(true);
-    await new Promise<void>((r) => setTimeout(r, 800));
-    const result = login(email, password);
+    const result = await login(email, password);
     setLoading(false);
     if (!result.success) {
-      Alert.alert(
-        '로그인 실패',
-        '이메일 또는 비밀번호를 확인해주세요.\n\n💡 테스트 계정\n이메일: test@test.com\n비밀번호: 1234',
-      );
+      Alert.alert('로그인 실패', '이메일 또는 비밀번호를 확인해주세요.');
     }
   };
 
@@ -59,7 +55,7 @@ export default function LoginScreen({ navigation }: Props) {
 
         <View style={styles.hintBanner}>
           <Text style={styles.hintText}>
-            💡 테스트 계정: test@test.com / 1234
+            💡 테스트 계정: test@food.com / test1234
           </Text>
         </View>
 

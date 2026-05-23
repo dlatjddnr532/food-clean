@@ -13,6 +13,7 @@ import HomeScreen from './src/screens/HomeScreen';
 import UploadScreen from './src/screens/UploadScreen';
 import RecipeScreen from './src/screens/RecipeScreen';
 import ProfileScreen from './src/screens/ProfileScreen';
+import SupplementScreen from './src/screens/SupplementScreen';
 import { colors } from './src/utils/theme';
 import { MealType } from './src/types';
 
@@ -26,6 +27,7 @@ type TabParamList = {
   Home: undefined;
   Upload: { mealType?: MealType };
   Recipe: undefined;
+  Supplement: undefined;
   Profile: undefined;
 };
 
@@ -72,6 +74,14 @@ function MainTabs() {
         options={{
           tabBarLabel: '검색',
           tabBarIcon: ({ color }) => <Text style={{ fontSize: 22, color }}>🔍</Text>,
+        }}
+      />
+      <Tab.Screen
+        name="Supplement"
+        component={SupplementScreen}
+        options={{
+          tabBarLabel: '영양제',
+          tabBarIcon: ({ color }) => <Text style={{ fontSize: 22, color }}>💊</Text>,
         }}
       />
       <Tab.Screen

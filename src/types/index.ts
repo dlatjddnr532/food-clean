@@ -50,7 +50,25 @@ export interface Recipe {
   totalNutrition: NutritionInfo;
   steps: string[];
   content: string;
-  foodId: number;
+  foodId?: number;
+}
+
+// ── 영양제 관련 타입 ──
+export type SupplementTime = '아침' | '점심' | '저녁' | '취침';
+
+export interface Supplement {
+  id: string;
+  name: string;          // 영양제 이름 (ex. 비타민C)
+  dosage: string;        // 복용량 (ex. 1정, 2캡슐)
+  times: SupplementTime[]; // 복용 시간대
+  nutrients: string;     // 영양 성분 자유 텍스트 (ex. 비타민C 1000mg)
+  color: string;         // 카드 강조색
+}
+
+export interface SupplementTakenLog {
+  supplementId: string;
+  date: string;          // YYYY-MM-DD
+  times: SupplementTime[]; // 오늘 복용 완료한 시간대
 }
 
 export type Gender = 'male' | 'female';
@@ -127,8 +145,8 @@ export interface AppContextType {
   isLoggedIn: boolean;
   currentUser: AppUser | null;
   dailyGoals: DailyGoals;
-  login: (email: string, password: string) => { success: boolean; user?: AppUser };
-  signup: (userData: SignupData) => { success: boolean; message?: string };
+  login: (email: string, password: string) => Promise<{ success: boolean; user?: AppUser }>;
+  signup: (userData: SignupData) => Promise<{ success: boolean; message?: string }>;
   logout: () => void;
   updateProfile: (profile: Partial<UserProfile>) => void;
   mealLogs: MealLogEntry[];
@@ -145,6 +163,13 @@ export interface AppContextType {
   userRecipes: UserRecipe[];
   addUserRecipe: (recipe: UserRecipe) => void;
   removeUserRecipe: (id: string) => void;
+  supplements: Supplement[];
+  addSupplement: (supp: Supplement) => void;
+  removeSupplement: (id: string) => void;
+  updateSupplement: (supp: Supplement) => void;
+  supplementLogs: SupplementTakenLog[];
+  toggleSupplementTaken: (supplementId: string, time: SupplementTime) => void;
+  getTodayTakenTimes: (supplementId: string) => SupplementTime[];
 }
 
 export interface SignupData {

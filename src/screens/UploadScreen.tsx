@@ -10,9 +10,8 @@ import { BottomTabNavigationProp } from '@react-navigation/bottom-tabs';
 import { RouteProp } from '@react-navigation/native';
 import { colors, spacing, borderRadius, shadow } from '../utils/theme';
 import { useApp } from '../context/AppContext';
-import { AI_FOOD_RESULTS, DUMMY_FOODS } from '../data/dummyData';
 import { MealType, AiAnalysisResult, NutritionInfo, Food } from '../types';
-import { uploadFoodImage } from '../api/diet';
+import { uploadFoodImage, saveMealLog } from '../api/diet';
 
 type TabParamList = {
   Home: undefined;
@@ -28,64 +27,58 @@ type Props = {
 
 const MEAL_TYPES: MealType[] = ['아침', '점심', '저녁', '간식'];
 
-// 더미 AI 분석 (폴백용)
-function fakeAiAnalyze(): Promise<AiAnalysisResult> {
-  return new Promise((resolve) => {
-    setTimeout(() => {
-      const picked = AI_FOOD_RESULTS[Math.floor(Math.random() * AI_FOOD_RESULTS.length)];
-      const food = DUMMY_FOODS.find((f) => f.id === picked.foodId) ?? DUMMY_FOODS[0];
-      resolve({ aiResult: picked, food });
-    }, 1800);
-  });
+// 백엔드 ApiFoodInfo 구조 (diet.ts와 동일)
+interface ApiFoodInfo {
+  id: number; name: string; servingSize: number;
+  calories: number; carbs: number; protein: number; fat: number;
+  sugar: number; fiber: number; sodium: number;
 }
 
-// AI 반환 음식명으로 DUMMY_FOODS에서 매칭
-function matchFoodByName(name: string) {
-  const q = name.toLowerCase().trim();
-  // 정확히 포함되는 것 먼저
-  return (
-    DUMMY_FOODS.find((f) => f.name.toLowerCase().includes(q)) ??
-    DUMMY_FOODS.find((f) => q.includes(f.name.toLowerCase()))
-  );
-}
-
-// 실제 API 호출 → 실패하면 더미로 폴백
-async function realAiAnalyze(imageUri: string): Promise<AiAnalysisResult & { fromApi: boolean; apiCandidates?: string[] }> {
-  try {
-    const res = await uploadFoodImage(imageUri);
-    if (!res.success) {
-      throw new Error(res.message ?? '음식 사진이 아닙니다.');
-    }
-    if (res.success && res.foodName) {
-      const matched = matchFoodByName(res.foodName);
-      if (matched) {
-        return {
-          aiResult: { name: res.foodName, confidence: 90, foodId: matched.id },
-          food: matched,
-          fromApi: true,
-          apiCandidates: res.candidates,
-        };
-      }
-      return {
-        aiResult: { name: res.foodName, confidence: 85, foodId: -1 },
-        food: {
-          id: -1, name: res.foodName, emoji: '🍽️', category: '기타',
-          nutrition: { calories: 0, carbs: 0, protein: 0, fat: 0 },
-          per: '1인분',
-        },
-        fromApi: true,
-        apiCandidates: res.candidates,
-      };
-    }
-    throw new Error('API 분석 실패');
-  } catch (error) {
-    const message = error instanceof Error ? error.message : '';
-    if (message.includes('음식')) {
-      throw error;
-    }
-    const dummy = await fakeAiAnalyze();
-    return { ...dummy, fromApi: false };
+async function realAiAnalyze(imageUri: string): Promise<AiAnalysisResult & { fromApi: boolean; apiCandidates?: ApiFoodInfo[] }> {
+  const res = await uploadFoodImage(imageUri);
+  if (!res.success) {
+    throw new Error(res.message ?? '음식 사진이 아닙니다.');
   }
+
+  // ApiFoodInfo → Food 타입 변환 헬퍼
+  const apiToFood = (f: NonNullable<typeof res.matchedFoodInfo>): Food => ({
+    id: f.id,
+    name: f.name,
+    emoji: '🍽️',
+    category: '기타',
+    per: `${f.servingSize}g`,
+    nutrition: {
+      calories: f.calories,
+      carbs: f.carbs,
+      protein: f.protein,
+      fat: f.fat,
+      fiber: f.fiber,
+      sugar: f.sugar,
+      sodium: f.sodium,
+    },
+  });
+
+  if (res.matchedFoodInfo) {
+    // DB에서 정확히 매칭된 음식
+    return {
+      aiResult: { name: res.foodName, confidence: 90, foodId: res.matchedFoodInfo.id },
+      food: apiToFood(res.matchedFoodInfo),
+      fromApi: true,
+      apiCandidates: res.candidates,
+    };
+  }
+
+  // 매칭 실패 → 이름만으로 빈 Food 생성
+  return {
+    aiResult: { name: res.foodName, confidence: 70, foodId: -1 },
+    food: {
+      id: -1, name: res.foodName, emoji: '🍽️', category: '기타',
+      nutrition: { calories: 0, carbs: 0, protein: 0, fat: 0 },
+      per: '1인분',
+    },
+    fromApi: true,
+    apiCandidates: res.candidates,
+  };
 }
 
 // 영양소 배지
@@ -119,7 +112,7 @@ const nutriStyles = StyleSheet.create({
 
 export default function UploadScreen({ route }: Props) {
   const insets = useSafeAreaInsets();
-  const { addMealLog } = useApp();
+  const { addMealLog, currentUser } = useApp();
   const [image, setImage] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [detectedFood, setDetectedFood] = useState<(AiAnalysisResult & { fromApi?: boolean }) | null>(null);
@@ -181,19 +174,6 @@ export default function UploadScreen({ route }: Props) {
     }
   };
 
-  const buildCandidates = (detected: Food): Food[] => {
-    const calRange = 250;
-    const same = DUMMY_FOODS.filter(
-      (f) => f.id !== detected.id && f.category === detected.category,
-    );
-    const similar = DUMMY_FOODS.filter(
-      (f) =>
-        f.id !== detected.id &&
-        f.category !== detected.category &&
-        Math.abs(f.nutrition.calories - detected.nutrition.calories) <= calRange,
-    );
-    return [...same, ...similar].slice(0, 4);
-  };
 
   const analyze = async (imageUri: string): Promise<void> => {
     setLoading(true);
@@ -201,14 +181,24 @@ export default function UploadScreen({ route }: Props) {
       const result = await realAiAnalyze(imageUri);
       setDetectedFood(result);
       setSelectedFood(result.food);
-      // API가 candidates 줬으면 그걸 DUMMY_FOODS에서 매칭, 없으면 로컬 로직
+      // API가 candidates 줬으면 ApiFoodInfo 객체를 Food 타입으로 변환, 없으면 로컬 로직
       if (result.apiCandidates && result.apiCandidates.length > 0) {
-        const matched = result.apiCandidates
-          .map((name) => matchFoodByName(name))
-          .filter((f): f is Food => f !== undefined && f.id !== result.food.id);
+        const matched: Food[] = result.apiCandidates
+          .filter((c) => c.id !== result.food.id)
+          .map((c) => ({
+            id: c.id,
+            name: c.name,
+            emoji: '🍽️',
+            category: '기타',
+            per: `${c.servingSize}g`,
+            nutrition: {
+              calories: c.calories, carbs: c.carbs, protein: c.protein,
+              fat: c.fat, fiber: c.fiber, sugar: c.sugar, sodium: c.sodium,
+            },
+          }));
         setCandidates(matched.slice(0, 4));
       } else {
-        setCandidates(buildCandidates(result.food));
+        setCandidates([]); // 후보 없음 — API candidates도 없는 경우
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : '분석에 실패했어요.';
@@ -240,15 +230,37 @@ export default function UploadScreen({ route }: Props) {
     setEditNutriVisible(true);
   };
 
-  const handleSave = (customNutrition?: NutritionInfo): void => {
+  const handleSave = async (customNutrition?: NutritionInfo): Promise<void> => {
     if (!detectedFood) return;
     const baseFood = selectedFood ?? detectedFood.food;
     const nutritionToUse = customNutrition ?? computedN ?? baseFood.nutrition;
     const foodToAdd: Food = { ...baseFood, nutrition: nutritionToUse };
+
+    // 1. 로컬 상태 업데이트 (홈 화면 즉시 반영)
     addMealLog(selectedMeal, foodToAdd);
     setSaved(true);
     setEditNutriVisible(false);
     Alert.alert('저장 완료! 🎉', `${selectedMeal}에 "${foodToAdd.name}"이(가) 추가됐어요!`);
+
+    // 2. 서버에 식단 기록 저장 (백그라운드, 실패해도 로컬 저장은 유지)
+    if (currentUser) {
+      const today = new Date().toISOString().split('T')[0]; // 'YYYY-MM-DD'
+      saveMealLog(String(currentUser.id), {
+        mealType: selectedMeal,
+        foodName: foodToAdd.name,
+        quantity: quantity,
+        calories: nutritionToUse?.calories ?? 0,
+        carbs: nutritionToUse?.carbs ?? 0,
+        protein: nutritionToUse?.protein ?? 0,
+        fat: nutritionToUse?.fat ?? 0,
+        fiber: nutritionToUse?.fiber,
+        sugar: nutritionToUse?.sugar,
+        sodium: nutritionToUse?.sodium,
+        eatDate: today,
+      }).catch(() => {
+        // 서버 저장 실패 시 조용히 무시 (로컬에는 이미 저장됨)
+      });
+    }
   };
 
   const food = selectedFood ?? detectedFood?.food;
@@ -298,6 +310,25 @@ export default function UploadScreen({ route }: Props) {
     };
     addMealLog(selectedMeal, food);
     Alert.alert('추가 완료! 🎉', `${selectedMeal}에 "${food.name}"이(가) 추가됐어요!`);
+
+    // 서버에 식단 기록 저장 (백그라운드)
+    if (currentUser) {
+      const today = new Date().toISOString().split('T')[0];
+      saveMealLog(String(currentUser.id), {
+        mealType: selectedMeal,
+        foodName: food.name,
+        quantity: 100,
+        calories: food.nutrition.calories ?? 0,
+        carbs: food.nutrition.carbs ?? 0,
+        protein: food.nutrition.protein ?? 0,
+        fat: food.nutrition.fat ?? 0,
+        fiber: food.nutrition.fiber,
+        sugar: food.nutrition.sugar,
+        sodium: food.nutrition.sodium,
+        eatDate: today,
+      }).catch(() => {});
+    }
+
     setManualName('');
     setManualCalories('');
     setManualCarbs('');
@@ -595,6 +626,65 @@ export default function UploadScreen({ route }: Props) {
   );
 }
 
+// ── 직접 입력 모달 스타일 ──
+const mStyles = StyleSheet.create({
+  backdrop: {
+    position: 'absolute', top: 0, left: 0, right: 0, bottom: 0,
+    backgroundColor: 'rgba(0,0,0,0.45)',
+  },
+  sheet: {
+    position: 'absolute', bottom: 0, left: 0, right: 0,
+    backgroundColor: colors.white, borderTopLeftRadius: borderRadius.lg,
+    borderTopRightRadius: borderRadius.lg, padding: spacing.lg,
+    paddingBottom: spacing.xl,
+  },
+  title: { fontSize: 17, fontWeight: '800', color: colors.text, marginBottom: spacing.md },
+  label: { fontSize: 13, fontWeight: '600', color: colors.textLight, marginBottom: 4 },
+  sectionLabel: { fontSize: 13, fontWeight: '700', color: colors.text, marginTop: spacing.md, marginBottom: spacing.sm },
+  input: {
+    borderWidth: 1.5, borderColor: colors.border, borderRadius: borderRadius.sm,
+    padding: spacing.sm, fontSize: 14, color: colors.text, marginBottom: spacing.md,
+    backgroundColor: colors.background,
+  },
+  nutriRow: { flexDirection: 'row', gap: spacing.sm, marginBottom: 0 },
+  addBtn: {
+    backgroundColor: colors.primary, borderRadius: borderRadius.md,
+    padding: spacing.md, alignItems: 'center', marginTop: spacing.md,
+  },
+  addBtnText: { color: '#fff', fontSize: 15, fontWeight: '800' },
+  cancelBtn: { alignItems: 'center', padding: spacing.sm, marginTop: spacing.xs },
+  cancelText: { fontSize: 14, color: colors.textLight },
+});
+
+// ── 영양정보 수정 모달 스타일 ──
+const eStyles = StyleSheet.create({
+  backdrop: {
+    position: 'absolute', top: 0, left: 0, right: 0, bottom: 0,
+    backgroundColor: 'rgba(0,0,0,0.45)',
+  },
+  sheet: {
+    position: 'absolute', bottom: 0, left: 0, right: 0,
+    backgroundColor: colors.white, borderTopLeftRadius: borderRadius.lg,
+    borderTopRightRadius: borderRadius.lg, padding: spacing.lg,
+    paddingBottom: spacing.xl,
+  },
+  title: { fontSize: 17, fontWeight: '800', color: colors.text, marginBottom: spacing.md },
+  label: { fontSize: 13, fontWeight: '600', color: colors.textLight, marginBottom: 4 },
+  input: {
+    borderWidth: 1.5, borderColor: colors.border, borderRadius: borderRadius.sm,
+    padding: spacing.sm, fontSize: 14, color: colors.text, marginBottom: spacing.md,
+    backgroundColor: colors.background,
+  },
+  row: { flexDirection: 'row', gap: spacing.sm },
+  addBtn: {
+    backgroundColor: colors.primary, borderRadius: borderRadius.md,
+    padding: spacing.md, alignItems: 'center', marginTop: spacing.md,
+  },
+  addBtnText: { color: '#fff', fontSize: 15, fontWeight: '800' },
+  cancelBtn: { alignItems: 'center', padding: spacing.sm, marginTop: spacing.xs },
+  cancelText: { fontSize: 14, color: colors.textLight },
+});
+
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: colors.background, paddingHorizontal: spacing.lg },
   titleRow: {
@@ -676,18 +766,12 @@ const styles = StyleSheet.create({
   savedText: { color: colors.primary, fontSize: 15, fontWeight: '800' },
   notFoundBanner: {
     backgroundColor: '#FFF3E0', borderRadius: borderRadius.sm,
-    padding: spacing.md, alignItems: 'center', borderWidth: 1.5, borderColor: '#FFB74D',
-  },
-  notFoundText: { color: '#E65100', fontSize: 15, fontWeight: '800' },
-  notFoundSub: { color: '#BF360C', fontSize: 12, marginTop: 4 },
-  editNutriBtn: {
-    backgroundColor: colors.white, borderRadius: borderRadius.sm,
     padding: spacing.md, alignItems: 'center',
-    borderWidth: 1.5, borderColor: colors.primary,
+    borderWidth: 1.5, borderColor: '#FFB74D',
   },
-  editNutriBtnText: { color: colors.primary, fontSize: 14, fontWeight: '700' },
+  notFoundText: { fontSize: 14, color: '#E65100', fontWeight: '700' },
   quantityRow: {
-    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+    flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center',
     backgroundColor: colors.background, borderRadius: borderRadius.md,
     padding: spacing.sm, marginBottom: spacing.md,
   },
@@ -715,56 +799,15 @@ const styles = StyleSheet.create({
   candidateName: { fontSize: 11, color: colors.textLight, textAlign: 'center', fontWeight: '600' },
   candidateNameActive: { color: colors.primary },
   manualBtn: {
-    backgroundColor: colors.white, borderRadius: borderRadius.md,
-    padding: spacing.md, alignItems: 'center', marginBottom: spacing.md,
-    borderWidth: 1.5, borderColor: colors.border, borderStyle: 'dashed',
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
+    borderRadius: borderRadius.md, padding: spacing.md,
+    borderWidth: 1.5, borderColor: colors.border, gap: spacing.xs,
   },
-  manualBtnText: { color: colors.textLight, fontSize: 14, fontWeight: '700' },
-});
-
-const mStyles = StyleSheet.create({
-  backdrop: { flex: 1 },
-  sheet: {
-    backgroundColor: '#fff', borderTopLeftRadius: 24, borderTopRightRadius: 24,
-    padding: spacing.lg, paddingBottom: 40,
+  manualBtnText: { fontSize: 14, color: colors.textLight, fontWeight: '600' },
+  notFoundSub: { fontSize: 12, color: '#E65100', marginTop: 4 },
+  editNutriBtn: {
+    borderRadius: borderRadius.sm, padding: spacing.md, alignItems: 'center',
+    borderWidth: 1.5, borderColor: colors.primary,
   },
-  title: { fontSize: 18, fontWeight: '800', color: colors.text, textAlign: 'center', marginBottom: spacing.md },
-  label: { fontSize: 12, fontWeight: '600', color: colors.text, marginBottom: 4, marginTop: spacing.sm },
-  sectionLabel: { fontSize: 13, fontWeight: '700', color: colors.primary, marginTop: spacing.md, marginBottom: 0 },
-  input: {
-    borderWidth: 1.5, borderColor: colors.border, borderRadius: borderRadius.sm,
-    padding: spacing.sm, fontSize: 14, color: colors.text, backgroundColor: colors.background,
-  },
-  row: { flexDirection: 'row', gap: spacing.sm },
-  nutriRow: { flexDirection: 'row', gap: spacing.sm },
-  addBtn: {
-    backgroundColor: colors.primary, borderRadius: borderRadius.sm,
-    padding: spacing.md, alignItems: 'center', marginTop: spacing.lg,
-  },
-  addBtnText: { color: '#fff', fontSize: 15, fontWeight: '800' },
-  cancelBtn: { alignItems: 'center', marginTop: spacing.sm, padding: spacing.sm },
-  cancelText: { color: colors.textLight, fontSize: 14 },
-});
-
-const eStyles = StyleSheet.create({
-  backdrop: { flex: 1 },
-  sheet: {
-    backgroundColor: '#fff', borderTopLeftRadius: 24, borderTopRightRadius: 24,
-    padding: spacing.lg, paddingBottom: 40,
-  },
-  title: { fontSize: 18, fontWeight: '800', color: colors.text, textAlign: 'center', marginBottom: spacing.md },
-  label: { fontSize: 12, fontWeight: '600', color: colors.text, marginBottom: 4, marginTop: spacing.sm },
-  input: {
-    borderWidth: 1.5, borderColor: colors.border, borderRadius: borderRadius.sm,
-    padding: spacing.sm, fontSize: 14, color: colors.text, backgroundColor: colors.background,
-    textAlign: 'center',
-  },
-  row: { flexDirection: 'row', gap: spacing.sm },
-  addBtn: {
-    backgroundColor: colors.primary, borderRadius: borderRadius.sm,
-    padding: spacing.md, alignItems: 'center', marginTop: spacing.lg,
-  },
-  addBtnText: { color: '#fff', fontSize: 15, fontWeight: '800' },
-  cancelBtn: { alignItems: 'center', marginTop: spacing.sm, padding: spacing.sm },
-  cancelText: { color: colors.textLight, fontSize: 14 },
+  editNutriBtnText: { color: colors.primary, fontSize: 14, fontWeight: '700' },
 });

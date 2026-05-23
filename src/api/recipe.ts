@@ -35,8 +35,8 @@ export const getRecipeDetail = async (id: number): Promise<RecipeResponse> => {
   return response.data;
 };
 
-// 레시피 좋아요
+// 레시피 좋아요 토글 (누르면 좋아요, 다시 누르면 취소)
 export const likeRecipe = async (recipeId: number, userId: string): Promise<void> => {
-  const response = await api.post(`/recipes/${recipeId}/like`, { userId });
+  const response = await api.post(`/recipes/${recipeId}/like/${userId}`);
   return response.data;
 };

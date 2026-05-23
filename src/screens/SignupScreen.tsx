@@ -8,6 +8,7 @@ import { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import { colors, spacing, borderRadius, shadow } from '../utils/theme';
 import { useApp } from '../context/AppContext';
 import { Gender } from '../types';
+import { savePhysicalInfo } from '../api/auth';
 
 type RootStackParamList = {
   Login: undefined;
@@ -21,7 +22,7 @@ type Props = {
 const STEPS = ['계정 정보', '신체 정보'];
 
 export default function SignupScreen({ navigation }: Props) {
-  const { signup } = useApp();
+  const { signup, login } = useApp();
   const [step, setStep] = useState(0);
   const [loading, setLoading] = useState(false);
 
@@ -57,15 +58,38 @@ export default function SignupScreen({ navigation }: Props) {
       return;
     }
     setLoading(true);
-    await new Promise<void>((r) => setTimeout(r, 800));
-    const result = signup({ name, email, password, gender, age, height, weight });
-    setLoading(false);
-    if (result.success) {
-      Alert.alert('가입 완료! 🎉', '로그인해주세요.', [
-        { text: '확인', onPress: () => navigation.navigate('Login') },
-      ]);
-    } else {
-      Alert.alert('가입 실패', result.message ?? '오류가 발생했습니다.');
+    try {
+      // 1단계: 회원가입 (이메일·비밀번호·닉네임)
+      const result = await signup({ name, email, password, gender, age, height, weight });
+      if (!result.success) {
+        Alert.alert('가입 실패', result.message ?? '오류가 발생했습니다.');
+        return;
+      }
+
+      // 2단계: 로그인해서 userId 획득
+      const loginResult = await login(email, password);
+      if (!loginResult.success || !loginResult.user) {
+        // 회원가입은 됐으니 로그인 화면으로 이동
+        Alert.alert('가입 완료! 🎉', '로그인해주세요.', [
+          { text: '확인', onPress: () => navigation.navigate('Login') },
+        ]);
+        return;
+      }
+
+      // 3단계: 신체정보 저장 (목표 칼로리 계산용)
+      await savePhysicalInfo(String(loginResult.user.id), {
+        gender,
+        age,
+        height,
+        weight,
+        activityLevel: 'moderate',
+      });
+
+      Alert.alert('가입 완료! 🎉', '앱을 시작하세요!');
+    } catch {
+      Alert.alert('가입 실패', '서버 오류가 발생했습니다. 잠시 후 다시 시도해주세요.');
+    } finally {
+      setLoading(false);
     }
   };
 
