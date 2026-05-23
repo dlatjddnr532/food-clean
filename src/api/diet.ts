@@ -154,6 +154,15 @@ export const getRecipes = async (params?: {
   return response.data;
 };
 
+// ============================================================
+// [기능] 레시피 상세 조회 (steps 포함)
+// [엔드포인트] GET /recipes/:id
+// ============================================================
+export const getRecipeById = async (id: number): Promise<BackendRecipe> => {
+  const response = await api.get<BackendRecipe>(`/recipes/${id}`);
+  return response.data;
+};
+
 // ── 유튜브 레시피 분석 응답 타입 ──
 // 백엔드 recipes.service.ts createRecipeFromYoutube() 반환 구조 (Recipe 엔티티)
 interface YoutubeRecipeResponse {

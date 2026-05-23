@@ -6,7 +6,7 @@ import {
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { colors, spacing, borderRadius, shadow } from '../utils/theme';
 import { useApp } from '../context/AppContext';
-import { getRecipes, BackendRecipe, searchFoods, ApiFoodInfo } from '../api/diet';
+import { getRecipes, getRecipeById, BackendRecipe, searchFoods, ApiFoodInfo } from '../api/diet';
 import { Food, Recipe, MealType, NutritionInfo, UserRecipe } from '../types';
 import { analyzeYoutubeRecipe } from '../api/diet';
 import { CookingModeModal } from './CookingModeModal';
@@ -364,12 +364,30 @@ export default function RecipeScreen() {
 
   const [cookingMode, setCookingMode] = useState<{ title: string; steps: string[] } | null>(null);
 
-  const startCooking = (title: string, steps: string[]) => {
-    if (!steps || steps.length === 0) {
+  const startCooking = async (title: string, steps: string[], recipeId?: number) => {
+    // steps가 이미 있으면 바로 시작
+    if (steps && steps.length > 0) {
+      setCookingMode({ title, steps });
+      return;
+    }
+    // steps가 없으면 상세 조회로 다시 가져오기
+    if (!recipeId) {
       Alert.alert('조리 방법 없음', '이 레시피에는 등록된 조리 순서가 없어요.');
       return;
     }
-    setCookingMode({ title, steps });
+    try {
+      const detail = await getRecipeById(recipeId);
+      const detailSteps = (detail.steps ?? [])
+        .sort((a, b) => a.step_number - b.step_number)
+        .map((s) => s.description);
+      if (detailSteps.length === 0) {
+        Alert.alert('조리 방법 없음', '이 레시피에는 등록된 조리 순서가 없어요.');
+        return;
+      }
+      setCookingMode({ title, steps: detailSteps });
+    } catch {
+      Alert.alert('오류', '레시피 정보를 불러오지 못했어요.');
+    }
   };
 
   const filteredRecipes = useMemo(() => {
@@ -537,7 +555,7 @@ export default function RecipeScreen() {
             <View style={styles.expandActions}>
               <TouchableOpacity
                 style={styles.cookingBtn}
-                onPress={() => startCooking(item.title, item.steps)}
+                onPress={() => startCooking(item.title, item.steps, item.id)}
               >
                 <Text style={styles.cookingBtnText}>🍳 요리 시작</Text>
               </TouchableOpacity>
@@ -1024,7 +1042,7 @@ export default function RecipeScreen() {
                       <View style={styles.expandActions}>
                         <TouchableOpacity
                           style={[styles.cookingBtn, { marginBottom: spacing.xs }]}
-                          onPress={() => startCooking(r.title, r.steps)}
+                          onPress={() => startCooking(r.title, r.steps, r.id)}
                         >
                           <Text style={styles.cookingBtnText}>🍳 요리 시작</Text>
                         </TouchableOpacity>

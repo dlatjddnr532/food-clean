@@ -11,7 +11,6 @@ const VOICE_PREV = ['이전', '뒤로', '이전 단계', '돌아가'];
 const VOICE_FIRST = ['처음', '처음으로', '첫 번째'];
 const VOICE_EXIT = ['종료', '그만', '닫기', '끝'];
 
-// ── 요리 모드 모달 ──
 interface CookingModeProps {
   visible: boolean;
   title: string;
@@ -29,10 +28,19 @@ function CookingModeModal({ visible, title, steps, onClose }: CookingModeProps) 
   const slideAnim = useRef(new Animated.Value(0)).current;
   const totalSteps = steps.length;
 
-  // expo-speech-recognition 동적 import 시도
+  // 최신 값을 항상 참조하기 위한 refs (stale closure 방지)
+  const currentStepRef = useRef(currentStep);
+  const isListeningRef = useRef(isListening);
+  const subscriptionsRef = useRef<any[]>([]);
+  const ExpoSpeechRef = useRef<any>(null);
+
+  useEffect(() => { currentStepRef.current = currentStep; }, [currentStep]);
+  useEffect(() => { isListeningRef.current = isListening; }, [isListening]);
+  useEffect(() => { ExpoSpeechRef.current = ExpoSpeech; }, [ExpoSpeech]);
+
+  // expo-speech-recognition 동적 import
   useEffect(() => {
     try {
-      // eslint-disable-next-line @typescript-eslint/no-var-requires
       const mod = require('expo-speech-recognition');
       setExpoSpeech(mod);
     } catch {
@@ -40,7 +48,7 @@ function CookingModeModal({ visible, title, steps, onClose }: CookingModeProps) 
     }
   }, []);
 
-  // 모달 열릴 때 첫 단계로 초기화
+  // 모달 열릴 때 초기화
   useEffect(() => {
     if (visible) {
       setCurrentStep(0);
@@ -59,19 +67,22 @@ function CookingModeModal({ visible, title, steps, onClose }: CookingModeProps) 
     ]).start();
   };
 
+  // ref를 통해 항상 최신 currentStep 참조
   const goNext = useCallback(() => {
-    if (currentStep < totalSteps - 1) {
+    const cur = currentStepRef.current;
+    if (cur < totalSteps - 1) {
       animateSlide('left');
-      setCurrentStep((s) => s + 1);
+      setCurrentStep(cur + 1);
     }
-  }, [currentStep, totalSteps]);
+  }, [totalSteps]);
 
   const goPrev = useCallback(() => {
-    if (currentStep > 0) {
+    const cur = currentStepRef.current;
+    if (cur > 0) {
       animateSlide('right');
-      setCurrentStep((s) => s - 1);
+      setCurrentStep(cur - 1);
     }
-  }, [currentStep]);
+  }, []);
 
   const goFirst = useCallback(() => {
     animateSlide('right');
@@ -82,63 +93,95 @@ function CookingModeModal({ visible, title, steps, onClose }: CookingModeProps) 
   const handleVoiceResult = useCallback((text: string) => {
     setTranscript(text);
     const lower = text.toLowerCase();
-    if (VOICE_NEXT.some((k) => lower.includes(k))) {
-      goNext();
-    } else if (VOICE_PREV.some((k) => lower.includes(k))) {
-      goPrev();
-    } else if (VOICE_FIRST.some((k) => lower.includes(k))) {
-      goFirst();
-    } else if (VOICE_EXIT.some((k) => lower.includes(k))) {
+    if (VOICE_NEXT.some((k) => lower.includes(k))) goNext();
+    else if (VOICE_PREV.some((k) => lower.includes(k))) goPrev();
+    else if (VOICE_FIRST.some((k) => lower.includes(k))) goFirst();
+    else if (VOICE_EXIT.some((k) => lower.includes(k))) {
       stopListening();
       onClose();
     }
-    // 인식 후 자동 재시작 (연속 인식)
     setTimeout(() => setTranscript(''), 1500);
   }, [goNext, goPrev, goFirst, onClose]);
 
+  const handleVoiceResultRef = useRef(handleVoiceResult);
+  useEffect(() => { handleVoiceResultRef.current = handleVoiceResult; }, [handleVoiceResult]);
+
+  const stopListening = useCallback(() => {
+    // 구독 해제
+    subscriptionsRef.current.forEach((sub) => {
+      try { sub?.remove?.(); } catch { /* ignore */ }
+    });
+    subscriptionsRef.current = [];
+
+    const speech = ExpoSpeechRef.current;
+    if (speech && isListeningRef.current) {
+      try { speech.ExpoSpeechRecognitionModule.stop(); } catch { /* ignore */ }
+    }
+    setIsListening(false);
+  }, []);
+
   const startListening = async () => {
     if (!ExpoSpeech) {
-      setVoiceError('음성 인식을 사용하려면 expo-speech-recognition 설치가 필요해요.\nnpx expo install expo-speech-recognition');
+      setVoiceError('expo-speech-recognition 설치가 필요해요.');
       return;
     }
     try {
-      const { ExpoSpeechRecognitionModule, useSpeechRecognitionEvent } = ExpoSpeech;
-      await ExpoSpeechRecognitionModule.requestPermissionsAsync();
-      ExpoSpeechRecognitionModule.start({ lang: 'ko-KR', continuous: true, interimResults: false });
+      const { ExpoSpeechRecognitionModule } = ExpoSpeech;
+
+      const { status } = await ExpoSpeechRecognitionModule.requestPermissionsAsync();
+      if (status !== 'granted') {
+        setVoiceError('마이크 권한이 필요해요.');
+        return;
+      }
+
+      // 결과 이벤트 리스너
+      const resultSub = ExpoSpeechRecognitionModule.addListener('result', (event: any) => {
+        const text = event?.results?.[0]?.transcript ?? '';
+        if (text) handleVoiceResultRef.current(text);
+      });
+
+      // 인식 종료 시 자동 재시작 (연속 인식)
+      const endSub = ExpoSpeechRecognitionModule.addListener('end', () => {
+        if (isListeningRef.current) {
+          try {
+            ExpoSpeechRecognitionModule.start({ lang: 'ko-KR', continuous: false, interimResults: false });
+          } catch { /* ignore */ }
+        }
+      });
+
+      subscriptionsRef.current = [resultSub, endSub];
+      ExpoSpeechRecognitionModule.start({ lang: 'ko-KR', continuous: false, interimResults: false });
       setIsListening(true);
       setVoiceError('');
-    } catch (e: any) {
+    } catch {
       setVoiceError('마이크 권한이 필요해요.');
     }
-  };
-
-  const stopListening = () => {
-    if (ExpoSpeech && isListening) {
-      try {
-        ExpoSpeech.ExpoSpeechRecognitionModule.stop();
-      } catch { /* ignore */ }
-    }
-    setIsListening(false);
   };
 
   const toggleListening = () => {
     isListening ? stopListening() : startListening();
   };
 
-  // 스와이프 제스처
+  // 스와이프 제스처 — ref 콜백으로 stale closure 방지
+  const goNextRef = useRef(goNext);
+  const goPrevRef = useRef(goPrev);
+  useEffect(() => { goNextRef.current = goNext; }, [goNext]);
+  useEffect(() => { goPrevRef.current = goPrev; }, [goPrev]);
+
   const panResponder = useRef(
     PanResponder.create({
-      onMoveShouldSetPanResponder: (_, g) => Math.abs(g.dx) > 20 && Math.abs(g.dy) < 40,
+      onStartShouldSetPanResponder: () => true,
+      onMoveShouldSetPanResponder: (_, g) => Math.abs(g.dx) > 5,
+      onPanResponderTerminationRequest: () => false,
       onPanResponderRelease: (_, g) => {
-        if (g.dx < -50) goNext();
-        else if (g.dx > 50) goPrev();
+        if (g.dx < -40) goNextRef.current();
+        else if (g.dx > 40) goPrevRef.current();
       },
     })
   ).current;
 
-  // 진행률 색상
   const progressColor = (i: number) =>
-    i < currentStep ? colors.primary : i === currentStep ? colors.primary : colors.border;
+    i <= currentStep ? colors.primary : colors.border;
 
   if (!visible) return null;
 
@@ -206,7 +249,6 @@ function CookingModeModal({ visible, title, steps, onClose }: CookingModeProps) 
             <Text style={[cStyles.navTxt, currentStep === 0 && cStyles.navTxtDisabled]}>◀ 이전</Text>
           </TouchableOpacity>
 
-          {/* 마이크 버튼 */}
           <TouchableOpacity
             style={[cStyles.micBtn, isListening && cStyles.micBtnActive]}
             onPress={toggleListening}

@@ -4,7 +4,7 @@ const BASE_URL = 'https://food-dq5i.onrender.com';
 
 const api: AxiosInstance = axios.create({
   baseURL: BASE_URL,
-  timeout: 10000,
+  timeout: 60000,
 });
 
 // 요청마다 토큰 자동 첨부 (로그인 후 사용)
