@@ -51,6 +51,8 @@ export interface Recipe {
   steps: string[];
   content: string;
   foodId?: number;
+  creatorId?: string;
+  creatorName?: string; // 작성자 닉네임 (소셜 피드 표시용)
 }
 
 // ── 영양제 관련 타입 ──
@@ -87,10 +89,11 @@ export interface UserProfile {
 }
 
 export interface AppUser {
-  id: number;
+  id: string;   // 백엔드 UUID (e.g. "550e8400-e29b-41d4-a716-446655440000")
   email: string;
   password: string;
   profile: UserProfile;
+  savedGoals?: DailyGoals | null; // 서버에서 받아온 목표값 (없으면 로컬 공식 사용)
 }
 
 export interface DailyGoals {
@@ -105,7 +108,7 @@ export interface DailyGoals {
 
 export interface MealLogEntry {
   id: number;
-  userId: number;
+  userId: string;
   date: string;
   mealType: MealType;
   food: Food;
@@ -128,6 +131,7 @@ export interface UserRecipe {
   steps: string[];
   totalNutrition: NutritionInfo;
   createdAt: string;
+  sharedRecipeId?: number;  // 공유 후 백엔드에서 부여받은 레시피 ID
 }
 
 export interface AiFoodResult {
@@ -143,6 +147,7 @@ export interface AiAnalysisResult {
 
 export interface AppContextType {
   isLoggedIn: boolean;
+  authReady: boolean;   // 토큰 복원 완료 여부 (스플래시 대기용)
   currentUser: AppUser | null;
   dailyGoals: DailyGoals;
   login: (email: string, password: string) => Promise<{ success: boolean; user?: AppUser }>;
@@ -152,7 +157,7 @@ export interface AppContextType {
   mealLogs: MealLogEntry[];
   todayLogs: MealLogEntry[];
   addMealLog: (mealType: MealType, food: Food) => MealLogEntry;
-  removeMealLog: (logId: number) => void;
+  removeMealLog: (logId: number) => Promise<void>;
   favoriteIds: number[];
   toggleFavorite: (recipeId: number) => void;
   isFavorite: (recipeId: number) => boolean;
@@ -163,6 +168,7 @@ export interface AppContextType {
   userRecipes: UserRecipe[];
   addUserRecipe: (recipe: UserRecipe) => void;
   removeUserRecipe: (id: string) => void;
+  updateUserRecipe: (recipe: UserRecipe) => void;
   supplements: Supplement[];
   addSupplement: (supp: Supplement) => void;
   removeSupplement: (id: string) => void;

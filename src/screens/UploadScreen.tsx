@@ -1,9 +1,10 @@
 import React, { useState } from 'react';
 import {
   View, Text, StyleSheet, TouchableOpacity,
-  Image, Alert, ActivityIndicator, ScrollView,
+  Image, Alert, ActivityIndicator,
   Modal, TextInput, KeyboardAvoidingView, Platform,
 } from 'react-native';
+import { KeyboardAwareScrollView } from 'react-native-keyboard-aware-scroll-view';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import * as ImagePicker from 'expo-image-picker';
 import { BottomTabNavigationProp } from '@react-navigation/bottom-tabs';
@@ -341,7 +342,13 @@ export default function UploadScreen({ route }: Props) {
   };
 
   return (
-    <ScrollView style={styles.container} showsVerticalScrollIndicator={false}>
+    <KeyboardAwareScrollView
+      style={styles.container}
+      showsVerticalScrollIndicator={false}
+      enableOnAndroid
+      extraScrollHeight={20}
+      keyboardShouldPersistTaps="handled"
+    >
       <View style={[styles.titleRow, { marginTop: insets.top }]}>
         <View>
           <Text style={styles.title}>AI 식단 분석</Text>
@@ -622,7 +629,7 @@ export default function UploadScreen({ route }: Props) {
       </Modal>
 
       <View style={{ height: 40 }} />
-    </ScrollView>
+    </KeyboardAwareScrollView>
   );
 }
 

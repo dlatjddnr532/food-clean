@@ -1,8 +1,9 @@
 import React, { useState, useMemo } from 'react';
 import {
   View, Text, StyleSheet, TouchableOpacity, ScrollView,
-  Modal, TextInput, Alert, KeyboardAvoidingView, Platform,
+  Modal, TextInput, Alert,
 } from 'react-native';
+import { KeyboardAwareScrollView } from 'react-native-keyboard-aware-scroll-view';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { colors, spacing, borderRadius } from '../utils/theme';
 import { useApp } from '../context/AppContext';
@@ -149,14 +150,14 @@ function AddSupplementModal({ visible, onClose, onAdd, colorIndex, initialData }
 
   return (
     <Modal visible={visible} transparent animationType="slide" onRequestClose={handleClose}>
-      <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={{ flex: 1 }}>
-        <View style={m.backdrop}>
-          <ScrollView
-            style={m.sheet}
-            keyboardShouldPersistTaps="handled"
-            showsVerticalScrollIndicator={false}
-            nestedScrollEnabled
-          >
+      <View style={m.backdrop}>
+        <KeyboardAwareScrollView
+          style={m.sheet}
+          keyboardShouldPersistTaps="handled"
+          showsVerticalScrollIndicator={false}
+          enableOnAndroid
+          extraScrollHeight={20}
+        >
             <Text style={m.title}>{isEdit ? '✏️ 영양제 수정' : '💊 영양제 추가'}</Text>
 
             <Text style={m.label}>영양제 이름 *</Text>
@@ -267,9 +268,8 @@ function AddSupplementModal({ visible, onClose, onAdd, colorIndex, initialData }
             <TouchableOpacity style={m.cancelBtn} onPress={handleClose}>
               <Text style={m.cancelText}>취소</Text>
             </TouchableOpacity>
-          </ScrollView>
-        </View>
-      </KeyboardAvoidingView>
+        </KeyboardAwareScrollView>
+      </View>
     </Modal>
   );
 }

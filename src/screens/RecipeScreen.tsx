@@ -6,10 +6,10 @@ import {
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { colors, spacing, borderRadius, shadow } from '../utils/theme';
 import { useApp } from '../context/AppContext';
-import { getRecipes, getRecipeById, BackendRecipe, searchFoods, ApiFoodInfo } from '../api/diet';
+import { getRecipes, getRecipeById, BackendRecipe, searchFoods, ApiFoodInfo, analyzeYoutubeRecipe, createRecipe, toggleRecipeLike, deleteRecipe } from '../api/diet';
 import { Food, Recipe, MealType, NutritionInfo, UserRecipe } from '../types';
-import { analyzeYoutubeRecipe } from '../api/diet';
 import { CookingModeModal } from './CookingModeModal';
+import { RecipeEditModal } from './RecipeEditModal';
 
 const TABS = ['즐겨찾기', '레시피', '재료·음식', '나만의 레시피'] as const;
 const TAB_ICONS = ['❤️', '📋', '🥬', '📹'];
@@ -83,7 +83,19 @@ function AddMealModal({ visible, item, onClose, onAdd }: AddMealModalProps) {
   };
 
   useEffect(() => {
-    if (item) { setQuantity(100); setEditMode(false); }
+    if (item) {
+      setQuantity(100);
+      const n = defaultNutrition;
+      const allZero = !n || (n.calories === 0 && n.carbs === 0 && n.protein === 0 && n.fat === 0);
+      if (allZero) {
+        // 영양정보 없음 → 바로 직접 입력 모드
+        setEditMode(true);
+        setCalories(''); setCarbs(''); setProtein(''); setFat('');
+        setFiber(''); setSugar(''); setSodium('');
+      } else {
+        setEditMode(false);
+      }
+    }
   }, [item]);
 
   const openEditMode = () => {
@@ -162,14 +174,17 @@ function AddMealModal({ visible, item, onClose, onAdd }: AddMealModalProps) {
             ))}
           </View>
 
-          <TouchableOpacity
-            style={modal.editToggle}
-            onPress={() => editMode ? setEditMode(false) : openEditMode()}
-          >
-            <Text style={modal.editToggleText}>
-              {editMode ? '✕ 기본값 사용' : '✏️ 영양정보 직접 수정'}
-            </Text>
-          </TouchableOpacity>
+          {/* 영양정보가 있을 때만 직접수정 토글 표시 */}
+          {defaultNutrition && (defaultNutrition.calories > 0 || defaultNutrition.protein > 0) && (
+            <TouchableOpacity
+              style={modal.editToggle}
+              onPress={() => editMode ? setEditMode(false) : openEditMode()}
+            >
+              <Text style={modal.editToggleText}>
+                {editMode ? '✕ 기본값 사용' : '✏️ 영양정보 직접 수정'}
+              </Text>
+            </TouchableOpacity>
+          )}
 
           {editMode && (
             <View style={modal.editArea}>
@@ -293,10 +308,12 @@ const modal = StyleSheet.create({
 
 export default function RecipeScreen() {
   const insets = useSafeAreaInsets();
-  const { addMealLog, favoriteIds, toggleFavorite, isFavorite, userRecipes, addUserRecipe, removeUserRecipe, currentUser } = useApp();
+  const { addMealLog, favoriteIds, toggleFavorite, isFavorite, userRecipes, addUserRecipe, removeUserRecipe, updateUserRecipe, currentUser } = useApp();
   const [activeTab, setActiveTab] = useState<0 | 1 | 2 | 3>(0);
 
   const [youtubeUrl, setYoutubeUrl] = useState('');
+  const [editModalVisible, setEditModalVisible] = useState(false);
+  const [editInitial, setEditInitial] = useState<Partial<UserRecipe> | null>(null);
   const [analyzing, setAnalyzing] = useState(false);
   const [analyzedRecipe, setAnalyzedRecipe] = useState<UserRecipe | null>(null);
   const [searchText, setSearchText] = useState('');
@@ -321,6 +338,12 @@ export default function RecipeScreen() {
     return raw;
   };
 
+  // ─────────────────────────────────────────────────────────────────────────
+  // backendToRecipe: 서버 응답(BackendRecipe) → 앱 내부 Recipe 타입으로 변환
+  // - likes_count → likes (좋아요 수 표시용)
+  // - creator.nickname → creatorName (작성자 닉네임 카드에 표시)
+  // - creator.id → creatorId (본인 레시피 여부 판단 + 삭제 버튼 노출)
+  // ─────────────────────────────────────────────────────────────────────────
   const backendToRecipe = (r: BackendRecipe): Recipe => ({
     id: r.id,
     title: r.title,
@@ -339,6 +362,8 @@ export default function RecipeScreen() {
       .sort((a, b) => a.step_number - b.step_number)
       .map((s) => s.description),
     content: r.content ?? '',
+    creatorId: r.creator?.id,
+    creatorName: r.creator?.nickname,
   });
 
   useEffect(() => {
@@ -390,27 +415,32 @@ export default function RecipeScreen() {
     }
   };
 
+  // 백엔드에 올라간 레시피는 본인 것 포함 모두 표시
+  const communityRecipes = useMemo(
+    () => allRecipes,
+    [allRecipes],
+  );
+
   const filteredRecipes = useMemo(() => {
     const q = searchText.toLowerCase();
-    if (!q) return allRecipes;
-    return allRecipes.filter(
+    if (!q) return communityRecipes;
+    return communityRecipes.filter(
       (r) =>
         r.title.toLowerCase().includes(q) ||
-        r.category.includes(q) ||
         r.ingredients.some((i) => i.name.toLowerCase().includes(q)),
     );
-  }, [searchText, allRecipes]);
+  }, [searchText, communityRecipes]);
 
   const favoriteRecipes = useMemo(
-    () => allRecipes.filter((r) => isFavorite(r.id)),
-    [favoriteIds, allRecipes],
+    () => communityRecipes.filter((r) => isFavorite(r.id)),
+    [favoriteIds, communityRecipes],
   );
 
   const allIngredientNames = useMemo<string[]>(() => {
     const names = new Set<string>();
-    allRecipes.forEach((r) => r.ingredients.forEach((i) => { if (i.name) names.add(i.name); }));
+    communityRecipes.forEach((r) => r.ingredients.forEach((i) => { if (i.name) names.add(i.name); }));
     return Array.from(names).sort();
-  }, [allRecipes]);
+  }, [communityRecipes]);
 
   const filteredIngredientNames = useMemo<string[]>(() => {
     const q = searchText.toLowerCase();
@@ -458,7 +488,26 @@ export default function RecipeScreen() {
     }
   };
 
-  const toggleLike = (id: number): void => { toggleFavorite(id); };
+  // ─────────────────────────────────────────────────────────────────────────
+  // toggleLike: 좋아요 토글
+  // 1) 낙관적 업데이트 — UI 즉시 반영 (toggleFavorite)
+  // 2) POST /recipes/:id/like/:userId 호출
+  // 3) 서버 반환 likes_count로 카드 숫자 동기화
+  // ─────────────────────────────────────────────────────────────────────────
+  const toggleLike = async (id: number): Promise<void> => {
+    toggleFavorite(id); // 낙관적 업데이트 (즉시 UI 반영)
+    if (currentUser) {
+      try {
+        const res = await toggleRecipeLike(id, currentUser.id);
+        // 서버 likes_count로 동기화
+        setAllRecipes((prev) =>
+          prev.map((r) => (r.id === id ? { ...r, likes: res.likes_count } : r))
+        );
+      } catch {
+        // 실패해도 로컬 상태 유지
+      }
+    }
+  };
 
   const handleAdd = (mealType: MealType, item: ModalItem, customNutrition: NutritionInfo): void => {
     let food: Food;
@@ -490,11 +539,46 @@ export default function RecipeScreen() {
           <View style={styles.cardBody}>
             <View style={styles.cardTitleRow}>
               <Text style={styles.cardTitle} numberOfLines={1}>{item.title}</Text>
-              <TouchableOpacity onPress={() => toggleLike(item.id)} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
-                <Text style={{ fontSize: 18 }}>{isFavorite(item.id) ? '❤️' : '🤍'}</Text>
-              </TouchableOpacity>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                {item.creatorId === String(currentUser?.id ?? '') && (
+                  <TouchableOpacity
+                    onPress={() => Alert.alert('레시피 삭제', `"${item.title}"을 삭제할까요?`, [
+                      { text: '취소', style: 'cancel' },
+                      {
+                        text: '삭제', style: 'destructive',
+                        onPress: async () => {
+                          // 로컬 상태 먼저 제거 (백엔드 DELETE /recipes/:id/:userId 구현 후 API 연동 예정)
+                          setAllRecipes((prev) => prev.filter((r) => r.id !== item.id));
+                          try { await deleteRecipe(item.id, String(currentUser!.id)); } catch {}
+                        },
+                      },
+                    ])}
+                    hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                  >
+                    <Text style={{ fontSize: 16 }}>🗑️</Text>
+                  </TouchableOpacity>
+                )}
+                <TouchableOpacity
+                  onPress={() => toggleLike(item.id)}
+                  hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                  style={{ flexDirection: 'row', alignItems: 'center', gap: 3 }}
+                >
+                  <Text style={{ fontSize: 16 }}>{isFavorite(item.id) ? '❤️' : '🤍'}</Text>
+                  {item.likes > 0 && (
+                    <Text style={{
+                      fontSize: 12, fontWeight: '700',
+                      color: isFavorite(item.id) ? '#E74C3C' : colors.textLight,
+                    }}>
+                      {item.likes}
+                    </Text>
+                  )}
+                </TouchableOpacity>
+              </View>
             </View>
             <Text style={styles.cardMeta}>⏱️ {item.cookTime}분 · {item.category}</Text>
+            {item.creatorName && (
+              <Text style={styles.cardCreator}>👤 {item.creatorName}</Text>
+            )}
             {hasNutrition ? (
               <View style={styles.calRow}>
                 <Text style={styles.cardCal}>🔥 {n.calories} kcal</Text>
@@ -614,7 +698,7 @@ export default function RecipeScreen() {
               </View>
             </View>
           ) : (
-            <Text style={styles.fiNoNutri}>영양정보 없음 · 추가 후 직접 수정 가능</Text>
+            <Text style={styles.fiNoNutri}>✏️ 추가 시 직접 입력</Text>
           )}
         </View>
 
@@ -636,6 +720,10 @@ export default function RecipeScreen() {
       Alert.alert('URL 입력', '유튜브 URL을 입력해주세요.');
       return;
     }
+    if (!currentUser) {
+      Alert.alert('로그인 필요', '로그인 후 사용할 수 있어요.');
+      return;
+    }
     const isYoutube = youtubeUrl.includes('youtube.com') || youtubeUrl.includes('youtu.be');
     if (!isYoutube) {
       Alert.alert('잘못된 URL', '유튜브 URL만 지원해요.\n예: https://youtube.com/watch?v=...');
@@ -644,7 +732,7 @@ export default function RecipeScreen() {
     setAnalyzing(true);
     setAnalyzedRecipe(null);
     try {
-      const res = await analyzeYoutubeRecipe(String(currentUser?.id ?? ''), youtubeUrl.trim());
+      const res = await analyzeYoutubeRecipe(String(currentUser.id), youtubeUrl.trim());
       if (res.success && res.title) {
         const newRecipe: UserRecipe = {
           id: res.id ? String(res.id) : String(Date.now()),
@@ -660,37 +748,22 @@ export default function RecipeScreen() {
             .map((s) => s.description),
           totalNutrition: { calories: 0, carbs: 0, protein: 0, fat: 0 },
           createdAt: new Date().toLocaleDateString('ko-KR'),
+          sharedRecipeId: res.id,  // 백엔드가 이미 저장한 레시피 ID
         };
         setAnalyzedRecipe(newRecipe);
       } else {
-        const dummyRecipe: UserRecipe = {
-          id: String(Date.now()),
-          title: '분석된 레시피',
-          emoji: '🍳',
-          category: '나만의 요리',
-          cookTime: 30,
-          servings: 2,
-          youtubeUrl: youtubeUrl.trim(),
-          ingredients: [
-            { name: '닭가슴살', amount: '200g' },
-            { name: '양상추', amount: '100g' },
-            { name: '방울토마토', amount: '50g' },
-            { name: '올리브오일', amount: '1스푼' },
-          ],
-          steps: [
-            '닭가슴살을 소금, 후추로 밑간한다.',
-            '팬에 올리브오일을 두르고 닭가슴살을 굽는다.',
-            '양상추와 방울토마토를 썰어 준비한다.',
-            '구운 닭가슴살을 얹어 완성한다.',
-          ],
-          totalNutrition: { calories: 320, carbs: 12, protein: 42, fat: 11, fiber: 3, sugar: 5, sodium: 480 },
-          createdAt: new Date().toLocaleDateString('ko-KR'),
-        };
-        setAnalyzedRecipe(dummyRecipe);
-        Alert.alert('미리보기 모드', '백엔드가 아직 연결되지 않아 예시 레시피를 보여드려요.');
+        Alert.alert(
+          '분석 실패 😥',
+          '이 영상에서 레시피를 찾지 못했어요.\n\n' +
+          '✅ 잘 되는 영상:\n• 한국어 자막이 있는 요리 영상\n• 말로 설명하는 쿠킹 채널\n\n' +
+          '❌ 안 되는 영상:\n• 자막 없는 영상\n• 배경 음악만 있는 영상',
+        );
       }
     } catch {
-      Alert.alert('오류', '분석 중 문제가 생겼어요. 다시 시도해주세요.');
+      Alert.alert(
+        '연결 오류 😥',
+        '서버와 연결할 수 없어요.\n잠시 후 다시 시도해주세요.',
+      );
     } finally {
       setAnalyzing(false);
     }
@@ -699,10 +772,181 @@ export default function RecipeScreen() {
   const handleSaveUserRecipe = () => {
     if (!analyzedRecipe) return;
     addUserRecipe(analyzedRecipe);
+    // YouTube 분석 레시피는 백엔드가 이미 저장 → allRecipes에도 바로 반영
+    if (analyzedRecipe.sharedRecipeId) {
+      const asRecipe: Recipe = {
+        id: analyzedRecipe.sharedRecipeId,
+        title: analyzedRecipe.title,
+        emoji: analyzedRecipe.emoji,
+        category: analyzedRecipe.category,
+        cookTime: analyzedRecipe.cookTime,
+        tools: [],
+        ingredients: analyzedRecipe.ingredients.map((i) => ({
+          name: i.name,
+          amount: i.amount,
+          nutrition: { calories: 0, carbs: 0, protein: 0, fat: 0 },
+        })),
+        steps: analyzedRecipe.steps,
+        totalNutrition: analyzedRecipe.totalNutrition,
+        likes: 0,
+        content: analyzedRecipe.steps.join('\n'),
+        creatorId: String(currentUser?.id ?? ''),
+        creatorName: currentUser?.profile?.name,
+      };
+      setAllRecipes((prev) => [asRecipe, ...prev]);
+    }
     setAnalyzedRecipe(null);
     setYoutubeUrl('');
-    Alert.alert('저장 완료! ✅', `"${analyzedRecipe.title}" 레시피가 저장됐어요.`);
+    Alert.alert('공개 완료! 🎉', `"${analyzedRecipe.title}" 레시피가 레시피 탭에 공개됐어요.`);
   };
+
+  // 직접 작성 / 수정 후 저장
+  const openNewRecipe = () => {
+    setEditInitial(null);
+    setEditModalVisible(true);
+  };
+
+  const openEditRecipe = (recipe: UserRecipe) => {
+    setEditInitial(recipe);
+    setEditModalVisible(true);
+  };
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // handleEditSave: 레시피 직접 작성/수정 저장
+  // - 신규 레시피: 나만의 레시피(로컬)에만 저장 → 공개는 별도 "공개하기" 버튼
+  // - 기존 수정: 로컬 업데이트 + 공개 상태라면 레시피 탭(allRecipes)도 즉시 동기화
+  //   * 수정 PATCH API 없음 → 프론트 로컬만 반영 (백엔드 구현 대기)
+  // ─────────────────────────────────────────────────────────────────────────
+  const handleEditSave = (recipe: UserRecipe) => {
+    // 기존 레시피 수정인지 신규인지 구분
+    const isExisting = userRecipes.some((r) => r.id === recipe.id);
+    if (isExisting) {
+      updateUserRecipe(recipe);
+      // 공유된 레시피라면 레시피 탭에도 즉시 반영
+      if (recipe.sharedRecipeId) {
+        setAllRecipes((prev) =>
+          prev.map((r) =>
+            r.id === recipe.sharedRecipeId
+              ? {
+                  ...r,
+                  title: recipe.title,
+                  emoji: recipe.emoji,
+                  cookTime: recipe.cookTime,
+                  category: recipe.category,
+                  ingredients: recipe.ingredients.map((i) => ({
+                    name: i.name,
+                    amount: i.amount,
+                    nutrition: { calories: 0, carbs: 0, protein: 0, fat: 0 },
+                  })),
+                  steps: recipe.steps,
+                  totalNutrition: recipe.totalNutrition,
+                  content: recipe.steps.join('\n'),
+                }
+              : r
+          )
+        );
+      }
+    } else {
+      // 신규 레시피 → 로컬에만 저장 (공개는 사용자가 직접 "공개하기" 버튼으로)
+      addUserRecipe(recipe);
+    }
+    setEditModalVisible(false);
+    setAnalyzedRecipe(null);
+    setYoutubeUrl('');
+  };
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // handlePublishUserRecipe: 나만의 레시피를 레시피 탭에 공개
+  // - POST /recipes/:userId 로 DB에 저장
+  // - 반환된 id를 sharedRecipeId로 저장 → 이후 수정/삭제 시 서버와 연결
+  // - allRecipes 앞에 추가 → 레시피 탭 즉시 반영
+  // ─────────────────────────────────────────────────────────────────────────
+  const handlePublishUserRecipe = async (recipe: UserRecipe) => {
+    if (!currentUser) return;
+    Alert.alert(
+      '레시피 공개',
+      `"${recipe.title}"을 레시피 탭에 공개할까요?`,
+      [
+        { text: '취소', style: 'cancel' },
+        {
+          text: '공개하기', style: 'default',
+          onPress: async () => {
+            const dto = {
+              title: recipe.title,
+              content: recipe.steps.join('\n'),
+              ingredients: recipe.ingredients.map((i) => i.name),
+              cooking_tools: [] as string[],
+              steps: recipe.steps.map((s, idx) => ({ step_number: idx + 1, description: s })),
+            };
+            try {
+              const result = await createRecipe(String(currentUser.id), dto);
+              const published = { ...recipe, sharedRecipeId: result.id };
+              updateUserRecipe(published);
+              setAllRecipes((prev) => [backendToRecipe(result), ...prev]);
+              Alert.alert('공개 완료! 🎉', `"${recipe.title}" 레시피가 레시피 탭에 공개됐어요.`);
+            } catch {
+              Alert.alert('오류', '공개에 실패했어요. 잠시 후 다시 시도해주세요.');
+            }
+          },
+        },
+      ],
+    );
+  };
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // handleUnpublishUserRecipe: 공개 레시피를 비공개로 전환
+  // - 낙관적 업데이트: 즉시 allRecipes에서 제거 + sharedRecipeId 초기화
+  // - DELETE /recipes/:id/:userId 호출 (백엔드 미구현 시 catch로 무시)
+  //   → 백엔드 구현되면 DB에서도 삭제, 앱 재시작 후에도 사라짐
+  //   → 미구현 상태: 로컬에선 사라지지만 앱 재시작 시 getRecipes()로 다시 표시됨
+  // ─────────────────────────────────────────────────────────────────────────
+  const handleUnpublishUserRecipe = async (recipe: UserRecipe) => {
+    Alert.alert(
+      '비공개로 전환',
+      `"${recipe.title}"을 비공개로 전환할까요?\n레시피 탭에서 내려가고 나만의 레시피에만 남습니다.`,
+      [
+        { text: '취소', style: 'cancel' },
+        {
+          text: '비공개로 전환', style: 'destructive',
+          onPress: async () => {
+            // 로컬 즉시 반영
+            updateUserRecipe({ ...recipe, sharedRecipeId: undefined });
+            if (recipe.sharedRecipeId) {
+              setAllRecipes((prev) => prev.filter((r) => r.id !== recipe.sharedRecipeId));
+              // 백엔드 DELETE (구현되면 동작, 미구현 시 catch로 무시)
+              try {
+                await deleteRecipe(recipe.sharedRecipeId, String(currentUser?.id ?? ''));
+              } catch { /* 백엔드 DELETE 미구현 — 로컬만 반영 */ }
+            }
+          },
+        },
+      ],
+    );
+  };
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // handleDeleteUserRecipe: 나만의 레시피 완전 삭제
+  // - 로컬(userRecipes)에서 제거
+  // - 공개 상태(sharedRecipeId 있음)면 allRecipes에서도 제거
+  //   + DELETE API 호출 (백엔드 미구현 시 무시)
+  // ─────────────────────────────────────────────────────────────────────────
+  const handleDeleteUserRecipe = (r: UserRecipe) => {
+    Alert.alert('삭제', `"${r.title}" 삭제할까요?`, [
+      { text: '취소', style: 'cancel' },
+      {
+        text: '삭제',
+        style: 'destructive',
+        onPress: () => {
+          removeUserRecipe(r.id);
+          if (r.sharedRecipeId) {
+            setAllRecipes((prev) => prev.filter((a) => a.id !== r.sharedRecipeId));
+          }
+        },
+      },
+    ]);
+  };
+
+
 
   // ── 로딩 뷰 ──
   const LoadingView = () => (
@@ -879,13 +1123,24 @@ export default function RecipeScreen() {
       ) : (
         /* ── 나만의 레시피 탭 ── */
         <ScrollView style={{ flex: 1 }} contentContainerStyle={styles.list} showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled">
+
+          {/* 직접 작성 버튼 */}
+          <TouchableOpacity style={styles.writeRecipeBtn} onPress={openNewRecipe}>
+            <Text style={styles.writeRecipeEmoji}>✏️</Text>
+            <View style={{ flex: 1 }}>
+              <Text style={styles.writeRecipeTitle}>레시피 직접 작성</Text>
+              <Text style={styles.writeRecipeSub}>재료, 조리 순서를 직접 입력해요</Text>
+            </View>
+            <Text style={styles.writeRecipeArrow}>›</Text>
+          </TouchableOpacity>
+
           {/* URL 입력 카드 */}
           <View style={styles.youtubeCard}>
             <View style={styles.youtubeTitleRow}>
               <Text style={styles.youtubeEmoji}>📹</Text>
               <View>
                 <Text style={styles.youtubeTitle}>유튜브 레시피 가져오기</Text>
-                <Text style={styles.youtubeSub}>URL을 붙여넣으면 AI가 자동 분석해드려요</Text>
+                <Text style={styles.youtubeSub}>한국어 자막이 있는 요리 영상을 분석해드려요</Text>
               </View>
             </View>
             <View style={styles.urlInputRow}>
@@ -957,8 +1212,11 @@ export default function RecipeScreen() {
                 <TouchableOpacity style={styles.discardBtn} onPress={() => setAnalyzedRecipe(null)}>
                   <Text style={styles.discardBtnText}>다시 분석</Text>
                 </TouchableOpacity>
+                <TouchableOpacity style={styles.editRecipeBtn} onPress={() => analyzedRecipe && openEditRecipe(analyzedRecipe)}>
+                  <Text style={styles.editRecipeBtnText}>✏️ 수정 후 저장</Text>
+                </TouchableOpacity>
                 <TouchableOpacity style={styles.saveRecipeBtn} onPress={handleSaveUserRecipe}>
-                  <Text style={styles.saveRecipeBtnText}>💾 저장하기</Text>
+                  <Text style={styles.saveRecipeBtnText}>💾 바로 저장</Text>
                 </TouchableOpacity>
               </View>
             </View>
@@ -995,12 +1253,28 @@ export default function RecipeScreen() {
                     <View style={styles.cardBody}>
                       <View style={styles.cardTitleRow}>
                         <Text style={styles.cardTitle} numberOfLines={1}>{r.title}</Text>
-                        <TouchableOpacity onPress={() => Alert.alert('삭제', `${r.title} 삭제할까요?`, [
-                          { text: '취소', style: 'cancel' },
-                          { text: '삭제', style: 'destructive', onPress: () => removeUserRecipe(r.id) },
-                        ])}>
-                          <Text style={{ fontSize: 16 }}>🗑️</Text>
-                        </TouchableOpacity>
+                        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                          {r.sharedRecipeId ? (
+                            <TouchableOpacity
+                              style={styles.sharedBadge}
+                              onPress={() => handleUnpublishUserRecipe(r)}
+                              hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
+                            >
+                              <Text style={styles.sharedBadgeText}>🌐 공개됨 ∨</Text>
+                            </TouchableOpacity>
+                          ) : (
+                            <TouchableOpacity
+                              style={styles.privateBadgeBtn}
+                              onPress={() => handlePublishUserRecipe(r)}
+                              hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
+                            >
+                              <Text style={styles.privateBadgeText}>🔒 비공개  →공개</Text>
+                            </TouchableOpacity>
+                          )}
+                          <TouchableOpacity onPress={() => handleDeleteUserRecipe(r)}>
+                            <Text style={{ fontSize: 16 }}>🗑️</Text>
+                          </TouchableOpacity>
+                        </View>
                       </View>
                       <Text style={styles.cardMeta}>⏱️ {r.cookTime}분 · {r.category} · {r.servings}인분</Text>
                       {n.calories > 0 ? (
@@ -1041,14 +1315,20 @@ export default function RecipeScreen() {
                       </View>
                       <View style={styles.expandActions}>
                         <TouchableOpacity
-                          style={[styles.cookingBtn, { marginBottom: spacing.xs }]}
-                          onPress={() => startCooking(r.title, r.steps, r.id)}
+                          style={styles.cookingBtn}
+                          onPress={() => startCooking(r.title, r.steps, Number(r.id))}
                         >
-                          <Text style={styles.cookingBtnText}>🍳 요리 시작</Text>
+                          <Text style={styles.cookingBtnText}>🍳 요리 시작 (스텝 카드)</Text>
                         </TouchableOpacity>
-                        <TouchableOpacity style={styles.addBtn} onPress={() => setModalItem(asFood)}>
-                          <Text style={styles.addBtnText}>+ 식단 추가</Text>
-                        </TouchableOpacity>
+
+                        <View style={styles.expandBtnRow}>
+                          <TouchableOpacity style={styles.editBtn} onPress={() => openEditRecipe(r)}>
+                            <Text style={styles.editBtnText}>✏️ 수정</Text>
+                          </TouchableOpacity>
+                          <TouchableOpacity style={styles.addBtn} onPress={() => setModalItem(asFood)}>
+                            <Text style={styles.addBtnText}>+ 식단 추가</Text>
+                          </TouchableOpacity>
+                        </View>
                       </View>
                     </View>
                   )}
@@ -1064,6 +1344,15 @@ export default function RecipeScreen() {
         item={modalItem}
         onClose={() => setModalItem(null)}
         onAdd={(mealType, customNutrition) => modalItem && handleAdd(mealType, modalItem, customNutrition)}
+      />
+
+      <RecipeEditModal
+        visible={editModalVisible}
+        initial={editInitial}
+        userId={String(currentUser?.id ?? '')}
+        ingredientSuggestions={allIngredientNames}
+        onClose={() => setEditModalVisible(false)}
+        onSave={handleEditSave}
       />
 
       {cookingMode && (
@@ -1216,6 +1505,7 @@ const styles = StyleSheet.create({
   cardTitleRow: { flexDirection: 'row', alignItems: 'center', gap: spacing.xs, marginBottom: 2 },
   cardTitle: { fontSize: 15, fontWeight: '800', color: colors.text, flex: 1 },
   cardMeta: { fontSize: 12, color: colors.textLight, marginBottom: 4 },
+  cardCreator: { fontSize: 11, color: colors.textLight, marginTop: 1, marginBottom: 2, fontStyle: 'italic' },
   cardCal: { fontSize: 13, color: colors.primary, fontWeight: '700', marginRight: spacing.sm },
   calRow: { flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', gap: 4 },
   miniNutriRow: { flexDirection: 'row', gap: 4 },
@@ -1257,17 +1547,67 @@ const styles = StyleSheet.create({
   },
   stepNumText: { fontSize: 11, fontWeight: '800', color: '#fff' },
   stepText: { fontSize: 13, color: colors.text, lineHeight: 20, flex: 1 },
-  expandActions: { flexDirection: 'row', gap: spacing.sm, marginTop: spacing.xs },
+  expandActions: { flexDirection: 'column', gap: spacing.sm, marginTop: spacing.sm },
+  expandBtnRow: { flexDirection: 'row', gap: spacing.sm },
+  cookingBtn: {
+    backgroundColor: '#1E1E2E', borderRadius: borderRadius.md,
+    padding: spacing.sm, alignItems: 'center',
+  },
+  cookingBtnText: { color: '#A78BFA', fontSize: 13, fontWeight: '700' },
+  editBtn: {
+    flex: 1, backgroundColor: '#F0F4FF', borderRadius: borderRadius.md,
+    padding: spacing.sm, alignItems: 'center',
+    borderWidth: 1, borderColor: colors.primary,
+  },
+  editBtnText: { color: colors.primary, fontSize: 13, fontWeight: '800' },
   addBtn: {
     flex: 1, backgroundColor: colors.primary, borderRadius: borderRadius.md,
     padding: spacing.sm, alignItems: 'center',
   },
   addBtnText: { color: '#fff', fontSize: 13, fontWeight: '800' },
-  cookingBtn: {
-    flex: 1, backgroundColor: '#1E1E2E', borderRadius: borderRadius.md,
-    padding: spacing.sm, alignItems: 'center',
+
+  // ── 공유하기 버튼 ──
+  shareBtn: {
+    backgroundColor: '#4F46E5', borderRadius: borderRadius.md,
+    paddingVertical: 12, alignItems: 'center', marginBottom: spacing.xs,
   },
-  cookingBtnText: { color: '#A78BFA', fontSize: 13, fontWeight: '700' },
+  shareBtnDone: { backgroundColor: '#6B7280' },
+  shareBtnText: { color: '#fff', fontSize: 13, fontWeight: '800' },
+
+  // ── 공유됨 배지 ──
+  sharedBadge: {
+    backgroundColor: '#EEF2FF', borderRadius: 10,
+    paddingHorizontal: 8, paddingVertical: 3,
+    borderWidth: 1, borderColor: '#C7D2FE',
+  },
+  sharedBadgeText: { color: '#4F46E5', fontSize: 10, fontWeight: '700' },
+  privateBadgeBtn: {
+    backgroundColor: '#F1F5F9', borderRadius: 10,
+    paddingHorizontal: 8, paddingVertical: 3,
+    borderWidth: 1, borderColor: '#CBD5E1',
+  },
+  privateBadgeText: { color: '#64748B', fontSize: 10, fontWeight: '700' },
+
+  // ── 직접 작성 버튼 ──
+  writeRecipeBtn: {
+    flexDirection: 'row', alignItems: 'center', gap: spacing.md,
+    backgroundColor: '#fff', borderRadius: borderRadius.lg,
+    padding: spacing.md, marginBottom: spacing.sm,
+    borderWidth: 2, borderColor: colors.primary,
+    ...shadow.small,
+  },
+  writeRecipeEmoji: { fontSize: 28 },
+  writeRecipeTitle: { fontSize: 15, fontWeight: '800', color: colors.primary },
+  writeRecipeSub: { fontSize: 12, color: colors.textLight, marginTop: 2 },
+  writeRecipeArrow: { fontSize: 22, color: colors.primary, fontWeight: '300' },
+
+  // ── 분석 결과 수정 버튼 ──
+  editRecipeBtn: {
+    flex: 1, backgroundColor: '#F0F4FF', borderRadius: borderRadius.md,
+    padding: spacing.sm, alignItems: 'center',
+    borderWidth: 1, borderColor: colors.primary,
+  },
+  editRecipeBtnText: { color: colors.primary, fontSize: 13, fontWeight: '800' },
 
   // ── 유튜브 카드 ──
   youtubeCard: {
@@ -1291,10 +1631,11 @@ const styles = StyleSheet.create({
   urlInput: { flex: 1, fontSize: 13, color: colors.text },
   analyzeBtn: {
     backgroundColor: colors.primary, borderRadius: borderRadius.md,
-    padding: spacing.md, alignItems: 'center', height: 48, justifyContent: 'center',
+    paddingVertical: 14, paddingHorizontal: spacing.md,
+    alignItems: 'center', justifyContent: 'center',
   },
   analyzeBtnDisabled: { backgroundColor: colors.textLight },
-  analyzeBtnText: { color: '#fff', fontSize: 15, fontWeight: '800' },
+  analyzeBtnText: { color: '#fff', fontSize: 15, fontWeight: '800', textAlign: 'center' },
 
   // ── 분석 결과 카드 ──
   analyzedCard: {
@@ -1303,69 +1644,61 @@ const styles = StyleSheet.create({
     borderWidth: 1.5, borderColor: colors.primary + '40',
     ...shadow.small,
   },
-  analyzedHeader: { flexDirection: 'row', alignItems: 'center', gap: spacing.md, marginBottom: spacing.sm },
-  analyzedEmoji: { fontSize: 44 },
-  analyzedTitle: { fontSize: 16, fontWeight: '900', color: colors.text, flex: 1 },
+  analyzedHeader: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm, marginBottom: spacing.sm },
+  analyzedEmoji: { fontSize: 40 },
+  analyzedTitle: { fontSize: 17, fontWeight: '900', color: colors.text },
   analyzedMeta: { fontSize: 12, color: colors.textLight, marginTop: 2 },
-  nutritionRow: { flexDirection: 'row', gap: spacing.xs, marginBottom: spacing.md, flexWrap: 'wrap' },
-  analyzedActions: { flexDirection: 'row', gap: spacing.sm, marginTop: spacing.sm },
-  discardBtn: {
-    flex: 1, padding: spacing.md, borderRadius: borderRadius.md,
-    backgroundColor: colors.background, borderWidth: 1, borderColor: colors.border,
-    alignItems: 'center',
-  },
-  discardBtnText: { fontSize: 14, fontWeight: '700', color: colors.textLight },
-  saveRecipeBtn: {
-    flex: 1, padding: spacing.md, borderRadius: borderRadius.md,
-    backgroundColor: colors.primary, alignItems: 'center',
-  },
-  saveRecipeBtnText: { fontSize: 14, fontWeight: '800', color: '#fff' },
+  analyzedNutriRow: { flexDirection: 'row', gap: spacing.xs, marginBottom: spacing.md },
+  tab2LoadingText: { marginTop: spacing.sm, color: colors.textLight, fontSize: 13, textAlign: 'center' },
 
-  // ── 저장된 레시피 섹션 헤더 ──
-  savedHeader: {
-    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
-    marginVertical: spacing.sm,
-  },
-  savedTitle: { fontSize: 15, fontWeight: '800', color: colors.text },
-  savedCount: {
-    fontSize: 13, fontWeight: '700', color: colors.primary,
-    backgroundColor: colors.primaryLight, borderRadius: borderRadius.full,
-    paddingHorizontal: spacing.sm, paddingVertical: 2,
-  },
-
-  // ── Tab 2 음식·재료 통합 카드 ──
-  tab2LoadingRow: {
-    flexDirection: 'row', alignItems: 'center', gap: spacing.sm,
-    marginBottom: spacing.sm,
-  },
-  tab2LoadingText: { fontSize: 13, color: colors.textLight },
+  // ── 재료·음식 탭 음식 아이템 카드 (fi = food item) ──
   fiCard: {
-    backgroundColor: '#fff', borderRadius: borderRadius.md,
-    flexDirection: 'row', alignItems: 'center',
+    backgroundColor: '#fff',
+    borderRadius: borderRadius.md,
+    marginBottom: spacing.xs,
+    flexDirection: 'row',
+    alignItems: 'center',
     overflow: 'hidden',
     ...shadow.small,
   },
   fiCardSelected: {
-    borderWidth: 1.5, borderColor: colors.primary,
+    borderWidth: 1.5,
+    borderColor: colors.primary,
+    backgroundColor: '#F0F4FF',
   },
   fiSelectBar: {
-    width: 4, alignSelf: 'stretch',
+    width: 4,
+    alignSelf: 'stretch',
     backgroundColor: colors.border,
   },
-  fiBody: { flex: 1, paddingVertical: spacing.sm, paddingHorizontal: spacing.md, minWidth: 0 },
-  fiNameRow: { flexDirection: 'row', alignItems: 'center', gap: spacing.xs, marginBottom: 3 },
-  fiName: { fontSize: 15, fontWeight: '800', color: colors.text, flex: 1 },
-  fiCheckBadge: {
-    fontSize: 11, fontWeight: '700', color: colors.primary,
-    backgroundColor: colors.primaryLight, borderRadius: borderRadius.full,
-    paddingHorizontal: 6, paddingVertical: 2,
+  fiBody: {
+    flex: 1,
+    paddingVertical: spacing.sm,
+    paddingHorizontal: spacing.sm,
   },
-  fiCal: { fontSize: 12, color: colors.primary, fontWeight: '700', marginRight: spacing.xs },
+  fiNameRow: { flexDirection: 'row', alignItems: 'center', gap: spacing.xs, marginBottom: 2 },
+  fiName: { fontSize: 14, fontWeight: '700', color: colors.text, flex: 1 },
+  fiCheckBadge: {
+    fontSize: 10, color: colors.primary, fontWeight: '700',
+    backgroundColor: '#EEF2FF', borderRadius: 8, paddingHorizontal: 6, paddingVertical: 2,
+  },
+  fiCal: { fontSize: 12, color: '#E74C3C', fontWeight: '700', marginRight: 4 },
   fiNoNutri: { fontSize: 11, color: colors.textLight, fontStyle: 'italic' },
   fiAddBtn: {
-    width: 48, alignSelf: 'stretch',
     backgroundColor: colors.primary,
-    justifyContent: 'center', alignItems: 'center',
+    width: 36, height: 36,
+    borderRadius: 18,
+    alignItems: 'center', justifyContent: 'center',
   },
-  fiAddBtnText: { color: '#fff', fontSize: 26, fontWeight: '300', lineHeight: 30 },
+  fiAddBtnText: { color: '#fff', fontSize: 22, fontWeight: '700', lineHeight: 24 },
+  tab2LoadingRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', padding: spacing.md },
+  nutritionRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginTop: 6 },
+  analyzedActions: { flexDirection: 'row', gap: 10, marginTop: spacing.md },
+  discardBtn: { flex: 1, borderRadius: borderRadius.md, padding: spacing.sm, alignItems: 'center', borderWidth: 1, borderColor: colors.border },
+  discardBtnText: { color: colors.textLight, fontSize: 13, fontWeight: '700' },
+  saveRecipeBtn: { flex: 1, backgroundColor: colors.primary, borderRadius: borderRadius.md, padding: spacing.sm, alignItems: 'center' },
+  saveRecipeBtnText: { color: '#fff', fontSize: 13, fontWeight: '700' },
+  savedHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: spacing.sm },
+  savedTitle: { fontSize: 16, fontWeight: '700', color: colors.text },
+  savedCount: { fontSize: 13, color: colors.textLight },
 });

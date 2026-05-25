@@ -7,7 +7,12 @@ import { useApp } from '../context/AppContext';
 import { MealType, MealLogEntry } from '../types';
 
 // ─── 유틸 ──────────────────────────────────────────────────────────────────
-function toDateKey(d: Date): string { return d.toDateString(); }
+// toDateKey: Date → "YYYY-MM-DD" 문자열 변환
+// ※ mealLogs의 l.date 필드가 YYYY-MM-DD 형식이므로 반드시 일치시켜야 함
+//   (toDateString() 사용 시 "Sun May 25 2026" 형태가 되어 날짜 매칭 실패)
+function toDateKey(d: Date): string {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
 function todayKey(): string { return toDateKey(new Date()); }
 function fmt(d: Date): string {
   return d.toLocaleDateString('ko-KR', { year: 'numeric', month: 'long' });

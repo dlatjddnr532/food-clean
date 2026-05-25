@@ -7,7 +7,7 @@
 // ============================================================
 
 import api from './config';
-import { MealType, NutritionInfo } from '../types';
+import { MealType } from '../types';
 
 // ── 음식 사진 AI 분석 — 백엔드 반환 음식 정보 타입 ──
 // diet.service.ts convertToServing() 반환 구조와 동일
@@ -98,6 +98,15 @@ export const saveMealLog = async (userId: string, mealData: MealLogRequest): Pro
 };
 
 // ============================================================
+// [기능] 식단 기록 삭제
+// [화면] HomeScreen — 식단 항목 삭제 버튼 누르면 호출됨
+// [엔드포인트] DELETE /diet/log/:logId
+// ============================================================
+export const deleteMealLog = async (logId: number): Promise<void> => {
+  await api.delete(`/diet/log/${logId}`);
+};
+
+// ============================================================
 // [기능] 내 식단 기록 조회
 // [화면] HomeScreen, CalendarScreen — 오늘/특정 날짜 식단 불러올 때 사용
 // [엔드포인트] GET /diet/history/:userId?startDate=YYYY-MM-DD&endDate=YYYY-MM-DD
@@ -139,7 +148,7 @@ export interface BackendRecipe {
   thumbnail_img?: string | null;
   likes_count: number;
   created_at: string;
-  creator?: { id: number; nickname: string };
+  creator?: { id: string; nickname: string };
   ingredients: { id: number; name: string }[];
   cooking_tools: { id: number; name: string }[];
   steps?: { step_number: number; description: string; step_img?: string }[];
@@ -160,6 +169,45 @@ export const getRecipes = async (params?: {
 // ============================================================
 export const getRecipeById = async (id: number): Promise<BackendRecipe> => {
   const response = await api.get<BackendRecipe>(`/recipes/${id}`);
+  return response.data;
+};
+
+// ============================================================
+// [기능] 레시피 삭제 (본인 작성 레시피만)
+// [엔드포인트] DELETE /recipes/:id/:userId
+// ============================================================
+export const deleteRecipe = async (recipeId: number, userId: string): Promise<void> => {
+  await api.delete(`/recipes/${recipeId}/${userId}`);
+};
+
+// ============================================================
+// [기능] 레시피 좋아요 / 취소 토글
+// [화면] RecipeScreen — 하트 버튼 누를 때 호출됨
+// [엔드포인트] POST /recipes/:id/like/:userId
+// ============================================================
+export interface ToggleLikeResponse {
+  liked: boolean;
+  likes_count: number;
+}
+export const toggleRecipeLike = async (recipeId: number, userId: string): Promise<ToggleLikeResponse> => {
+  const response = await api.post<ToggleLikeResponse>(`/recipes/${recipeId}/like/${userId}`);
+  return response.data;
+};
+
+// ============================================================
+// [기능] 레시피 직접 등록
+// [화면] RecipeScreen '나만의 레시피' — 직접 작성 or AI 수정 후 저장
+// [엔드포인트] POST /recipes/:userId
+// ============================================================
+export const createRecipe = async (userId: string, dto: {
+  title: string;
+  content?: string;
+  thumbnail_img?: string;
+  ingredients: string[];
+  cooking_tools: string[];
+  steps: { step_number: number; description: string }[];
+}): Promise<BackendRecipe> => {
+  const response = await api.post<BackendRecipe>(`/recipes/${userId}`, dto);
   return response.data;
 };
 
@@ -212,21 +260,81 @@ export const analyzeYoutubeRecipe = async (userId: string, videoUrl: string): Pr
 };
 
 // ============================================================
-// [기능] 오늘 식단 AI 평가
-// [화면] HomeScreen — '오늘 식단 AI 평가받기' 버튼 누르면 호출 예정
-// [엔드포인트] POST /ai/evaluate  ← 백엔드 구현 필요
+// [기능] AI 맞춤 음식 추천
+// [화면] HomeScreen — 'AI 맞춤 추천' 카드 누르면 호출됨
+// [엔드포인트] GET /diet/recommend/:userId
+// 오늘/주간 섭취량 분석 → Gemini 가중치 → DB 스코어링 → 음식 3개 추천
 // ============================================================
-export const evaluateDiet = async (payload: {
-  foods: string[];
-  totals: { calories: number; carbs: number; protein: number; fat: number; fiber: number; sugar: number; sodium: number };
-  goals: { calories: number; carbs: number; protein: number; fat: number; fiber: number; sugar: number; sodium: number };
-}): Promise<{
-  score: number;
-  grade: string;
-  summary: string;
-  details: { emoji: string; text: string }[];
-  advice: string;
-}> => {
-  const response = await api.post('/ai/evaluate', payload);
+export interface AiRecommendFood {
+  dish_id: number;
+  dish_name: string;
+  calories: number;
+  carbs: number;
+  protein: number;
+  fat: number;
+  fiber: number;
+  sugar: number;
+  sodium: number;
+}
+
+export interface AiRecommendResponse {
+  success: boolean;
+  aiAnalysisReason: string;
+  recommendedFoods: AiRecommendFood[];
+}
+
+export const getAiRecommend = async (userId: string): Promise<AiRecommendResponse> => {
+  const response = await api.get<AiRecommendResponse>(`/diet/recommend/${userId}`);
+  return response.data;
+};
+
+// ============================================================
+// [기능] 주간 식단 AI 리포트
+// [화면] HomeScreen — '주간 식단 AI 리포트' 버튼 누르면 호출됨
+// [엔드포인트] GET /diet/report/weekly/:userId
+// ============================================================
+export interface WeeklyReportResponse {
+  success: boolean;
+  report: string;
+}
+
+export const getWeeklyReport = async (userId: string): Promise<WeeklyReportResponse> => {
+  const response = await api.get<WeeklyReportResponse>(`/diet/report/weekly/${userId}`);
+  return response.data;
+};
+
+// ============================================================
+// [기능] 홈 화면 대시보드 통합 조회
+// [화면] AppContext 로그인/앱복원 시 호출 — 서버 저장 목표칼로리 동기화용
+// [엔드포인트] GET /diet/dashboard/:userId
+// 반환: currentUser 닉네임, dailyGoals(서버 계산값), todayLogs, weeklyCalories
+// ============================================================
+export interface DashboardDailyGoals {
+  calories: number;
+  carbs: number;
+  protein: number;
+  fat: number;
+  fiber: number;
+  sugar: number;
+  sodium: number;
+}
+
+export interface DashboardResponse {
+  success: boolean;
+  currentUser: { profile: { name: string } };
+  dailyGoals: DashboardDailyGoals;
+  todayLogs: any[];
+  weeklyCalories: { day: string; calories: number }[];
+  todayWater: number;
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// getHomeDashboard: GET /diet/dashboard/:userId
+// 서버에서 계산된 목표 칼로리/영양소(dailyGoals)를 가져옴
+// - 로그인 직후, 앱 복원 시, 프로필 수정 후에 호출
+// - AppContext의 currentUser.savedGoals에 저장 → dailyGoals useMemo에서 우선 사용
+// ─────────────────────────────────────────────────────────────────────────
+export const getHomeDashboard = async (userId: string): Promise<DashboardResponse> => {
+  const response = await api.get<DashboardResponse>(`/diet/dashboard/${userId}`);
   return response.data;
 };

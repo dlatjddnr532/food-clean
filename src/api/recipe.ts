@@ -1,42 +1,15 @@
-import api from './config';
-import { NutritionInfo } from '../types';
-
-// 레시피 응답 타입 (백엔드 recipe.entity.ts 기반)
-interface RecipeResponse {
-  id: number;
-  title: string;
-  content: string;
-  thumbnail_img: string | null;
-  likes_count: number;
-  ingredients: IngredientItem[];
-  cooking_tools: CookingToolItem[];
-}
-
-interface IngredientItem {
-  id: number;
-  name: string;
-  nutrition?: NutritionInfo;
-}
-
-interface CookingToolItem {
-  id: number;
-  name: string;
-}
-
-// 레시피 목록 조회
-export const getRecipes = async (): Promise<RecipeResponse[]> => {
-  const response = await api.get<RecipeResponse[]>('/recipes');
-  return response.data;
-};
-
-// 레시피 상세 조회
-export const getRecipeDetail = async (id: number): Promise<RecipeResponse> => {
-  const response = await api.get<RecipeResponse>(`/recipes/${id}`);
-  return response.data;
-};
-
-// 레시피 좋아요 토글 (누르면 좋아요, 다시 누르면 취소)
-export const likeRecipe = async (recipeId: number, userId: string): Promise<void> => {
-  const response = await api.post(`/recipes/${recipeId}/like/${userId}`);
-  return response.data;
-};
+/**
+ * @deprecated 이 파일은 더 이상 사용되지 않습니다.
+ * 모든 레시피 API 함수는 ./diet.ts 를 사용하세요.
+ *
+ * getRecipes, getRecipeById, toggleRecipeLike, createRecipe,
+ * analyzeYoutubeRecipe, deleteRecipe → ./diet.ts
+ */
+export {
+  getRecipes,
+  getRecipeById,
+  toggleRecipeLike,
+  createRecipe,
+  analyzeYoutubeRecipe,
+  deleteRecipe,
+} from './diet';

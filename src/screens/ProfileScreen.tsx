@@ -1,8 +1,9 @@
 import React, { useState, useEffect } from 'react';
 import {
-  View, Text, StyleSheet, ScrollView,
+  View, Text, StyleSheet,
   TouchableOpacity, TextInput, Alert,
 } from 'react-native';
+import { KeyboardAwareScrollView } from 'react-native-keyboard-aware-scroll-view';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { colors, spacing, borderRadius, shadow } from '../utils/theme';
 import { useApp, calculateDailyGoals } from '../context/AppContext';
@@ -80,7 +81,13 @@ export default function ProfileScreen() {
   };
 
   return (
-    <ScrollView style={styles.container} showsVerticalScrollIndicator={false}>
+    <KeyboardAwareScrollView
+      style={styles.container}
+      showsVerticalScrollIndicator={false}
+      enableOnAndroid
+      extraScrollHeight={20}
+      keyboardShouldPersistTaps="handled"
+    >
       {/* 프로필 헤더 */}
       <View style={[styles.profileHeader, { paddingTop: spacing.xl + insets.top }]}>
         <View style={styles.avatar}>
@@ -246,7 +253,7 @@ export default function ProfileScreen() {
       </TouchableOpacity>
 
       <View style={{ height: 40 }} />
-    </ScrollView>
+    </KeyboardAwareScrollView>
   );
 }
 

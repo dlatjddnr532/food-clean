@@ -2,14 +2,24 @@
 // AppContext.tsx — 앱 전역 상태 관리 (로그인, 식단, 물 섭취 등)
 // ============================================================
 
-import React, { createContext, useContext, useState, useCallback, useMemo } from 'react';
-import { login as apiLogin, signup as apiSignup } from '../api/auth';
+import React, { createContext, useContext, useState, useCallback, useMemo, useEffect } from 'react';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import { login as apiLogin, signup as apiSignup, savePhysicalInfo } from '../api/auth';
+import { setToken, clearToken } from '../api/config';
 import {
   AppContextType, AppUser, UserProfile, MealLogEntry,
   MealType, Food, DailyGoals, SignupData, ActivityLevel, GoalType, UserRecipe,
   Supplement, SupplementTakenLog, SupplementTime,
 } from '../types';
-import { getMealLogs } from '../api/diet';
+import { getMealLogs, deleteMealLog, getHomeDashboard } from '../api/diet';
+
+const STORAGE_KEY_USER         = '@food_app:user';
+const STORAGE_KEY_TOKEN        = '@food_app:token';
+const STORAGE_KEY_USER_RECIPES = '@food_app:userRecipes';
+const STORAGE_KEY_FAVORITES    = '@food_app:favoriteIds';
+const STORAGE_KEY_SUPPLEMENTS  = '@food_app:supplements';
+const STORAGE_KEY_SUPP_LOGS    = '@food_app:supplementLogs';
+const STORAGE_KEY_WATER_LOGS   = '@food_app:waterLogs';
 
 const AppContext = createContext<AppContextType | null>(null);
 
@@ -124,6 +134,74 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const [supplements, setSupplements] = useState<Supplement[]>([]);
   const [supplementLogs, setSupplementLogs] = useState<SupplementTakenLog[]>([]);
 
+  // ── 앱 초기화 상태 (토큰 복원 중 로딩 표시용) ──
+  const [authReady, setAuthReady] = useState(false);
+
+  // ============================================================
+  // [기능] 앱 시작 시 저장된 토큰 + 유저 정보 복원
+  // ============================================================
+  useEffect(() => {
+    (async () => {
+      try {
+        const [storedToken, storedUser, storedRecipes, storedFavs, storedSupps, storedSuppLogs, storedWater] = await Promise.all([
+          AsyncStorage.getItem(STORAGE_KEY_TOKEN),
+          AsyncStorage.getItem(STORAGE_KEY_USER),
+          AsyncStorage.getItem(STORAGE_KEY_USER_RECIPES),
+          AsyncStorage.getItem(STORAGE_KEY_FAVORITES),
+          AsyncStorage.getItem(STORAGE_KEY_SUPPLEMENTS),
+          AsyncStorage.getItem(STORAGE_KEY_SUPP_LOGS),
+          AsyncStorage.getItem(STORAGE_KEY_WATER_LOGS),
+        ]);
+        // 로그인 여부와 무관하게 로컬 데이터 복원
+        try { if (storedRecipes) setUserRecipes(JSON.parse(storedRecipes)); } catch {}
+        try { if (storedFavs)    setFavoriteIds(JSON.parse(storedFavs));    } catch {}
+        try { if (storedSupps)   setSupplements(JSON.parse(storedSupps));   } catch {}
+        try { if (storedSuppLogs) setSupplementLogs(JSON.parse(storedSuppLogs)); } catch {}
+        try { if (storedWater)  setWaterLogs(JSON.parse(storedWater));      } catch {}
+        if (storedToken && storedUser) {
+          const user: AppUser = JSON.parse(storedUser);
+          setToken(storedToken);   // axios 헤더에 토큰 복원
+          setCurrentUser(user);
+          setIsLoggedIn(true);
+          // 식단 데이터도 다시 로드
+          try {
+            const end = todayStr();
+            const startD = new Date();
+            startD.setDate(startD.getDate() - 6);
+            const start = `${startD.getFullYear()}-${String(startD.getMonth() + 1).padStart(2, '0')}-${String(startD.getDate()).padStart(2, '0')}`;
+            const history = await getMealLogs(user.id, start, end);
+            const logs: MealLogEntry[] = history.rawLogs.map((l) => ({
+              id: l.id,
+              userId: String(l.userId),
+              date: l.eatDate,
+              mealType: l.mealType,
+              food: {
+                id: l.id, name: l.foodName, emoji: '🍽️', category: '기타',
+                per: `${l.quantity}g`,
+                nutrition: {
+                  calories: l.calories, carbs: l.carbs, protein: l.protein, fat: l.fat,
+                  fiber: l.fiber ?? 0, sugar: l.sugar ?? 0, sodium: l.sodium ?? 0,
+                },
+              },
+            }));
+            setMealLogs(logs);
+          } catch { /* 식단 로드 실패해도 로그인 유지 */ }
+
+          // 대시보드에서 서버 저장 목표칼로리 동기화
+          try {
+            const dashboard = await getHomeDashboard(user.id);
+            if (dashboard.success && dashboard.dailyGoals?.calories) {
+              const withGoals = { ...user, savedGoals: dashboard.dailyGoals };
+              setCurrentUser(withGoals);
+              await AsyncStorage.setItem(STORAGE_KEY_USER, JSON.stringify(withGoals));
+            }
+          } catch { /* 실패해도 로컬 공식으로 계산 */ }
+        }
+      } catch { /* 복원 실패 시 그냥 로그인 화면 */ }
+      finally { setAuthReady(true); }
+    })();
+  }, []);
+
   // ============================================================
   // [기능] 로그인 — POST /auth/login 호출
   // ============================================================
@@ -133,7 +211,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         const res = await apiLogin({ email, password });
         // 백엔드 응답: { id, email, nickname, token }
         const loggedInUser: AppUser = {
-          id: res.id as unknown as number,
+          id: String(res.id),  // 백엔드 UUID 그대로 string 보존
           email: res.email,
           password: '',
           profile: {
@@ -150,6 +228,12 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         setCurrentUser(loggedInUser);
         setIsLoggedIn(true);
 
+        // 토큰 + 유저 정보 AsyncStorage에 저장
+        await Promise.all([
+          AsyncStorage.setItem(STORAGE_KEY_TOKEN, res.token),
+          AsyncStorage.setItem(STORAGE_KEY_USER, JSON.stringify(loggedInUser)),
+        ]);
+
         // 로그인 후 최근 7일 식단 로드
         try {
           const end = todayStr();
@@ -159,7 +243,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           const history = await getMealLogs(String(res.id), start, end);
           const logs: MealLogEntry[] = history.rawLogs.map((l) => ({
             id: l.id,
-            userId: typeof l.userId === 'string' ? parseInt(l.userId, 10) : (l.userId as number),
+            userId: String(l.userId),
             date: l.eatDate, // YYYY-MM-DD
             mealType: l.mealType,
             food: {
@@ -183,6 +267,16 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         } catch {
           // 식단 로드 실패해도 로그인은 성공
         }
+
+        // 대시보드에서 서버 저장 목표칼로리 동기화
+        try {
+          const dashboard = await getHomeDashboard(String(res.id));
+          if (dashboard.success && dashboard.dailyGoals?.calories) {
+            const withGoals = { ...loggedInUser, savedGoals: dashboard.dailyGoals };
+            setCurrentUser(withGoals);
+            await AsyncStorage.setItem(STORAGE_KEY_USER, JSON.stringify(withGoals));
+          }
+        } catch { /* 실패해도 로컬 공식으로 계산 */ }
 
         return { success: true, user: loggedInUser };
       } catch {
@@ -221,18 +315,42 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     setCurrentUser(null);
     setIsLoggedIn(false);
     setMealLogs([]);
+    clearToken();
+    AsyncStorage.multiRemove([STORAGE_KEY_TOKEN, STORAGE_KEY_USER, STORAGE_KEY_USER_RECIPES, STORAGE_KEY_FAVORITES, STORAGE_KEY_SUPPLEMENTS, STORAGE_KEY_SUPP_LOGS, STORAGE_KEY_WATER_LOGS]);
   }, []);
 
   // ============================================================
   // [기능] 프로필 수정 (나이, 키, 몸무게, 목표 등)
-  // 현재: 로컬 상태만 업데이트
-  // 백엔드 연결 시: PUT /user/profile 호출 → user_profile 테이블 UPDATE
+  // 로컬 즉시 업데이트 후, 백그라운드로 POST /users/:userId/physical-info 호출
+  // → 서버의 goal_calories/goal_macros 재계산 → dashboard로 savedGoals 갱신
   // ============================================================
   const updateProfile = useCallback(
     (newProfile: Partial<UserProfile>) => {
+      // 1. 로컬 즉시 반영
       setCurrentUser((prev) => {
         if (!prev) return prev;
-        return { ...prev, profile: { ...prev.profile, ...newProfile } };
+        const updated = { ...prev, profile: { ...prev.profile, ...newProfile } };
+
+        // 2. 백그라운드 서버 동기화 (setState 콜백 내부에서 최신 값 캡처)
+        const p = updated.profile;
+        savePhysicalInfo(updated.id, {
+          gender: p.gender,
+          age: p.age,
+          height: p.height,
+          weight: p.weight,
+          activityLevel: p.activityLevel,
+        })
+          .then(() => getHomeDashboard(updated.id))
+          .then((dashboard) => {
+            if (dashboard.success && dashboard.dailyGoals?.calories) {
+              setCurrentUser((u) =>
+                u ? { ...u, savedGoals: dashboard.dailyGoals } : u,
+              );
+            }
+          })
+          .catch(() => { /* 실패해도 로컬 반영 유지 */ });
+
+        return updated;
       });
     },
     [],
@@ -248,7 +366,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     (mealType: MealType, food: Food): MealLogEntry => {
       const newLog: MealLogEntry = {
         id: Date.now(),
-        userId: currentUser?.id ?? 0,
+        userId: currentUser?.id ?? '',
         date: todayStr(), // YYYY-MM-DD
         mealType,
         food,
@@ -260,11 +378,16 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   );
 
   // ============================================================
-  // [기능] 식단 기록 삭제
-  // 백엔드 연결 시: DELETE /meal-log/:logId 호출
+  // [기능] 식단 기록 삭제 — DELETE /diet/log/:logId
   // ============================================================
-  const removeMealLog = useCallback((logId: number) => {
+  const removeMealLog = useCallback(async (logId: number) => {
+    // 낙관적 업데이트: 먼저 로컬에서 제거
     setMealLogs((prev) => prev.filter((l) => l.id !== logId));
+    try {
+      await deleteMealLog(logId);
+    } catch {
+      // 서버 삭제 실패해도 로컬은 이미 제거됨 (UX 우선)
+    }
   }, []);
 
   // ============================================================
@@ -329,6 +452,60 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   // ============================================================
+  // [기능] 나만의 레시피 업데이트 (공유 후 sharedRecipeId 저장 등)
+  // ============================================================
+  const updateUserRecipe = useCallback((updated: UserRecipe) => {
+    setUserRecipes((prev) => prev.map((r) => (r.id === updated.id ? updated : r)));
+  }, []);
+
+  // ============================================================
+  // [기능] 영양제 CRUD + 복용 기록
+  // ============================================================
+  const addSupplement = useCallback((supp: Supplement) => {
+    setSupplements((prev) => [...prev, supp]);
+  }, []);
+
+  const removeSupplement = useCallback((id: string) => {
+    setSupplements((prev) => prev.filter((s) => s.id !== id));
+  }, []);
+
+  const updateSupplement = useCallback((updated: Supplement) => {
+    setSupplements((prev) => prev.map((s) => (s.id === updated.id ? updated : s)));
+  }, []);
+
+  const toggleSupplementTaken = useCallback((supplementId: string, time: SupplementTime) => {
+    const today = new Date();
+    const date = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
+    setSupplementLogs((prev) => {
+      const existing = prev.find((l) => l.supplementId === supplementId && l.date === date);
+      if (existing) {
+        const hasTaken = existing.times.includes(time);
+        return prev.map((l) =>
+          l.supplementId === supplementId && l.date === date
+            ? { ...l, times: hasTaken ? l.times.filter((t) => t !== time) : [...l.times, time] }
+            : l
+        );
+      }
+      return [...prev, { supplementId, date, times: [time] }];
+    });
+  }, []);
+
+  const getTodayTakenTimes = useCallback((supplementId: string): SupplementTime[] => {
+    const today = new Date();
+    const date = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
+    return supplementLogs.find((l) => l.supplementId === supplementId && l.date === date)?.times ?? [];
+  }, [supplementLogs]);
+
+    // ============================================================
+  // [기능] 로컬 데이터 자동 저장 — 상태 변경 시마다 AsyncStorage에 반영
+  // ============================================================
+  useEffect(() => { AsyncStorage.setItem(STORAGE_KEY_USER_RECIPES, JSON.stringify(userRecipes)); }, [userRecipes]);
+  useEffect(() => { AsyncStorage.setItem(STORAGE_KEY_FAVORITES,    JSON.stringify(favoriteIds)); }, [favoriteIds]);
+  useEffect(() => { AsyncStorage.setItem(STORAGE_KEY_SUPPLEMENTS,  JSON.stringify(supplements)); }, [supplements]);
+  useEffect(() => { AsyncStorage.setItem(STORAGE_KEY_SUPP_LOGS,    JSON.stringify(supplementLogs)); }, [supplementLogs]);
+  useEffect(() => { AsyncStorage.setItem(STORAGE_KEY_WATER_LOGS,   JSON.stringify(waterLogs)); }, [waterLogs]);
+
+  // ============================================================
   // [기능] 주간 칼로리 계산 (홈 화면 꺾은선 그래프용)
   // 오늘 포함 7일간 날짜별 칼로리 합계 계산
   // 백엔드 연결 시: GET /meal-log/weekly?userId=... 로 서버에서 계산해서 받아도 됨
@@ -344,60 +521,46 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         .reduce((s, l) => s + (l.food?.nutrition?.calories ?? 0), 0);
       return { day: DAYS[d.getDay()], calories };
     });
-  }, [mealLogs, currentUser]);
+  }, [mealLogs, currentUser?.id]);
 
-  // 오늘 식단 기록만 필터링 (홈 화면 표시용)
-  const todayLogs = mealLogs.filter(
-    (l) => l.date === todayStr() && (l.userId === currentUser?.id || l.userId === Number(currentUser?.id)),
-  );
+  // ── 오늘 식단 로그 (날짜 필터) ──
+  const todayLogs = useMemo(() => {
+    const today = new Date();
+    const todayStr = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
+    return mealLogs.filter((l) => l.date === todayStr && l.userId === currentUser?.id);
+  }, [mealLogs, currentUser?.id]);
 
-  // 현재 사용자 프로필 기반으로 1일 권장량 계산
-  // 백엔드 연결 시: user_profile 테이블의 target_* 컬럼 값을 그대로 사용
-  const dailyGoals = calculateDailyGoals(currentUser?.profile ?? DEFAULT_PROFILE);
-
-  // ── 영양제 추가 ──
-  const addSupplement = useCallback((supp: Supplement) => {
-    setSupplements((prev) => [...prev, supp]);
-  }, []);
-
-  // ── 영양제 삭제 ──
-  const removeSupplement = useCallback((id: string) => {
-    setSupplements((prev) => prev.filter((s) => s.id !== id));
-    setSupplementLogs((prev) => prev.filter((l) => l.supplementId !== id));
-  }, []);
-
-  // ── 영양제 수정 ──
-  const updateSupplement = useCallback((supp: Supplement) => {
-    setSupplements((prev) => prev.map((s) => (s.id === supp.id ? supp : s)));
-  }, []);
-
-  // ── 오늘 복용 체크/해제 ──
-  const toggleSupplementTaken = useCallback((supplementId: string, time: SupplementTime) => {
-    const today = todayStr();
-    setSupplementLogs((prev) => {
-      const existing = prev.find((l) => l.supplementId === supplementId && l.date === today);
-      if (existing) {
-        const hasTaken = existing.times.includes(time);
-        return prev.map((l) =>
-          l.supplementId === supplementId && l.date === today
-            ? { ...l, times: hasTaken ? l.times.filter((t) => t !== time) : [...l.times, time] }
-            : l,
-        );
-      }
-      return [...prev, { supplementId, date: today, times: [time] }];
-    });
-  }, []);
-
-  // ── 오늘 특정 영양제의 복용 완료 시간대 조회 ──
-  const getTodayTakenTimes = useCallback((supplementId: string): SupplementTime[] => {
-    const today = todayStr();
-    return supplementLogs.find((l) => l.supplementId === supplementId && l.date === today)?.times ?? [];
-  }, [supplementLogs]);
+  // ── 일일 목표 — 서버 저장값 우선, 없으면 로컬 BMR 공식 ──
+  const dailyGoals = useMemo(() => {
+    // 서버에서 받아온 목표값이 있으면 그것을 우선 사용
+    if (currentUser?.savedGoals) return currentUser.savedGoals;
+    if (!currentUser) return { calories: 2000, carbs: 250, protein: 60, fat: 55, fiber: 25, sugar: 50, sodium: 2300 };
+    const p = currentUser.profile;
+    const weight = parseFloat(p.weight) || 60;
+    const height = parseFloat(p.height) || 165;
+    const age = parseFloat(p.age) || 25;
+    const actCoeff = { sedentary: 1.2, light: 1.375, moderate: 1.55, active: 1.725 }[p.activityLevel] ?? 1.2;
+    const bmr = p.gender === 'male'
+      ? 10 * weight + 6.25 * height - 5 * age + 5
+      : 10 * weight + 6.25 * height - 5 * age - 161;
+    const tdee = Math.round(bmr * actCoeff);
+    const target = p.goalType === 'diet' ? tdee - 300 : p.goalType === 'muscle' ? tdee + 300 : tdee;
+    return {
+      calories: target,
+      carbs: Math.round((target * 0.5) / 4),
+      protein: Math.round((target * 0.2) / 4),
+      fat: Math.round((target * 0.3) / 9),
+      fiber: 25,
+      sugar: 50,
+      sodium: 2300,
+    };
+  }, [currentUser]);
 
   return (
     <AppContext.Provider
       value={{
         isLoggedIn,
+        authReady,
         currentUser,
         dailyGoals,
         login,
@@ -418,6 +581,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         userRecipes,
         addUserRecipe,
         removeUserRecipe,
+        updateUserRecipe,
         supplements,
         addSupplement,
         removeSupplement,
@@ -432,7 +596,6 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   );
 }
 
-// 모든 화면에서 useApp()으로 전역 상태에 접근
 export function useApp(): AppContextType {
   const ctx = useContext(AppContext);
   if (!ctx) throw new Error('useApp must be used within AppProvider');

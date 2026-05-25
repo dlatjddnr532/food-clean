@@ -2,9 +2,10 @@ import React from 'react';
 import { NavigationContainer } from '@react-navigation/native';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
-import { Text } from 'react-native';
+import { Text, View, ActivityIndicator } from 'react-native';
 import { SafeAreaProvider, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { StatusBar } from 'expo-status-bar';
+import { colors } from './src/utils/theme';
 
 import { AppProvider, useApp } from './src/context/AppContext';
 import LoginScreen from './src/screens/LoginScreen';
@@ -14,7 +15,6 @@ import UploadScreen from './src/screens/UploadScreen';
 import RecipeScreen from './src/screens/RecipeScreen';
 import ProfileScreen from './src/screens/ProfileScreen';
 import SupplementScreen from './src/screens/SupplementScreen';
-import { colors } from './src/utils/theme';
 import { MealType } from './src/types';
 
 type RootStackParamList = {
@@ -97,7 +97,18 @@ function MainTabs() {
 }
 
 function RootNavigator() {
-  const { isLoggedIn } = useApp();
+  const { isLoggedIn, authReady } = useApp();
+
+  // 토큰 복원 완료 전 로딩 화면
+  if (!authReady) {
+    return (
+      <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: '#fff' }}>
+        <Text style={{ fontSize: 40, marginBottom: 16 }}>🥗</Text>
+        <ActivityIndicator size="large" color={colors.primary} />
+      </View>
+    );
+  }
+
   return (
     <Stack.Navigator screenOptions={{ headerShown: false }}>
       {isLoggedIn ? (

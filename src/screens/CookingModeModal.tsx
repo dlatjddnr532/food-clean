@@ -235,7 +235,7 @@ function CookingModeModal({ visible, title, steps, onClose }: CookingModeProps) 
           </View>
         ) : isListening ? (
           <View style={cStyles.transcriptBox}>
-            <Text style={cStyles.listeningTxt}>🎤 듣고 있어요... "다음", "이전", "종료"</Text>
+            <Text style={cStyles.listeningTxt}>{'🎤 듣고 있어요... "다음", "이전", "종료"'}</Text>
           </View>
         ) : null}
 
