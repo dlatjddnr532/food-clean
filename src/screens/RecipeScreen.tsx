@@ -771,33 +771,17 @@ export default function RecipeScreen() {
 
   const handleSaveUserRecipe = () => {
     if (!analyzedRecipe) return;
+    const title = analyzedRecipe.title;
     addUserRecipe(analyzedRecipe);
-    // YouTube 분석 레시피는 백엔드가 이미 저장 → allRecipes에도 바로 반영
-    if (analyzedRecipe.sharedRecipeId) {
-      const asRecipe: Recipe = {
-        id: analyzedRecipe.sharedRecipeId,
-        title: analyzedRecipe.title,
-        emoji: analyzedRecipe.emoji,
-        category: analyzedRecipe.category,
-        cookTime: analyzedRecipe.cookTime,
-        tools: [],
-        ingredients: analyzedRecipe.ingredients.map((i) => ({
-          name: i.name,
-          amount: i.amount,
-          nutrition: { calories: 0, carbs: 0, protein: 0, fat: 0 },
-        })),
-        steps: analyzedRecipe.steps,
-        totalNutrition: analyzedRecipe.totalNutrition,
-        likes: 0,
-        content: analyzedRecipe.steps.join('\n'),
-        creatorId: String(currentUser?.id ?? ''),
-        creatorName: currentUser?.profile?.name,
-      };
-      setAllRecipes((prev) => [asRecipe, ...prev]);
-    }
+    // YouTube 분석 레시피는 백엔드가 analyzeYoutubeRecipe 호출 시점에 이미 DB에 저장함
+    // → 수동으로 allRecipes에 추가하면 중복 표시됨
+    // → 대신 getRecipes()를 다시 호출해서 서버 기준으로 목록 갱신
+    getRecipes()
+      .then((data) => setAllRecipes(data.map(backendToRecipe)))
+      .catch(() => {});
     setAnalyzedRecipe(null);
     setYoutubeUrl('');
-    Alert.alert('공개 완료! 🎉', `"${analyzedRecipe.title}" 레시피가 레시피 탭에 공개됐어요.`);
+    Alert.alert('저장 완료! 🎉', `"${title}" 레시피가 나만의 레시피와 레시피 탭에 추가됐어요.`);
   };
 
   // 직접 작성 / 수정 후 저장
