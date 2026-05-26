@@ -6,12 +6,13 @@ import {
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { colors, spacing, borderRadius, shadow } from '../utils/theme';
 import { useApp } from '../context/AppContext';
-import { getRecipes, getRecipeById, BackendRecipe, searchFoods, ApiFoodInfo, analyzeYoutubeRecipe, createRecipe, toggleRecipeLike, deleteRecipe } from '../api/diet';
+import { getRecipes, getRecipeById, BackendRecipe, getTop3Recipes, analyzeYoutubeRecipe, createRecipe, toggleRecipeLike, deleteRecipe } from '../api/diet';
 import { Food, Recipe, MealType, NutritionInfo, UserRecipe } from '../types';
 import { CookingModeModal } from './CookingModeModal';
 import { RecipeEditModal } from './RecipeEditModal';
 
 const TABS = ['즐겨찾기', '레시피', '재료·음식', '나만의 레시피'] as const;
+const COOKING_TOOLS = ['프라이팬', '냄비', '전자레인지', '에어프라이어', '오븐', '믹서기', '블렌더', '찜기', '냉장고', '그릇'];
 const TAB_ICONS = ['❤️', '📋', '🥬', '📹'];
 const MEAL_TYPES: MealType[] = ['아침', '점심', '저녁', '간식'];
 
@@ -35,12 +36,12 @@ function NutriBadge({ label, value, color, unit = 'g' }: NutriBadgeProps) {
 const nStyles = StyleSheet.create({
   badge: {
     alignItems: 'center', borderWidth: 1,
-    borderRadius: borderRadius.sm, paddingHorizontal: 7, paddingVertical: 4,
+    borderRadius: borderRadius.sm, paddingHorizontal: 4, paddingVertical: 2,
     backgroundColor: '#fff',
-    minWidth: 44,
+    minWidth: 32,
   },
-  val: { fontSize: 12, fontWeight: '800' },
-  lbl: { fontSize: 9, color: colors.textLight, marginTop: 1 },
+  val: { fontSize: 10, fontWeight: '800' },
+  lbl: { fontSize: 8, color: colors.textLight, marginTop: 0 },
 });
 
 // ── 식사 추가 모달 ──
@@ -309,7 +310,7 @@ const modal = StyleSheet.create({
 export default function RecipeScreen() {
   const insets = useSafeAreaInsets();
   const { addMealLog, favoriteIds, toggleFavorite, isFavorite, userRecipes, addUserRecipe, removeUserRecipe, updateUserRecipe, currentUser } = useApp();
-  const [activeTab, setActiveTab] = useState<0 | 1 | 2 | 3>(0);
+  const [activeTab, setActiveTab] = useState<0 | 1 | 2 | 3>(1);
 
   const [youtubeUrl, setYoutubeUrl] = useState('');
   const [editModalVisible, setEditModalVisible] = useState(false);
@@ -317,19 +318,27 @@ export default function RecipeScreen() {
   const [analyzing, setAnalyzing] = useState(false);
   const [analyzedRecipe, setAnalyzedRecipe] = useState<UserRecipe | null>(null);
   const [searchText, setSearchText] = useState('');
+  const [availableTools, setAvailableTools] = useState<string[]>([]); // 사용 가능한 조리기구 목록
+  const [toolFilterVisible, setToolFilterVisible] = useState(false); // 조리기구 필터 패널 표시 여부
   const [expandedId, setExpandedId] = useState<number | null>(null);
   const [expandedUserRecipeId, setExpandedUserRecipeId] = useState<string | null>(null);
   const [modalItem, setModalItem] = useState<ModalItem | null>(null);
   const [selectedIngredients, setSelectedIngredients] = useState<string[]>([]);
   const recipeListRef = useRef<FlatList>(null);
+  // 탭 전환 후 FlatList 마운트 시 스크롤할 인덱스 보관 (ref이므로 리렌더 없음)
+  const pendingScrollIndexRef = useRef<number | null>(null);
 
   const [allRecipes, setAllRecipes] = useState<Recipe[]>([]);
   const [recipesLoading, setRecipesLoading] = useState(false);
-
-  // ── 음식 검색 (Tab 2) ──
-  const [foodResults, setFoodResults] = useState<ApiFoodInfo[]>([]);
-  const [foodSearchLoading, setFoodSearchLoading] = useState(false);
-
+  // 서버 기준 인기 레시피 — GET /recipes/top3 결과
+  // 로드 실패 시 top3Display(프론트 계산)로 자동 폴백
+  const [top3Recipes, setTop3Recipes] = useState<Recipe[]>([]);
+  const excludeTools = useMemo(
+    () => availableTools.length > 0
+      ? COOKING_TOOLS.filter((tool) => !availableTools.includes(tool))
+      : [],
+    [availableTools],
+  );
   const parseIngredientName = (raw: string): string => {
     try {
       const parsed = JSON.parse(raw);
@@ -357,7 +366,15 @@ export default function RecipeScreen() {
       amount: '',
       nutrition: { calories: 0, carbs: 0, protein: 0, fat: 0 },
     })),
-    totalNutrition: { calories: 0, carbs: 0, protein: 0, fat: 0 },
+    totalNutrition: {
+      calories: r.calories ?? 0,
+      carbs: r.carbs ?? 0,
+      protein: r.protein ?? 0,
+      fat: r.fat ?? 0,
+      fiber: r.fiber ?? 0,
+      sugar: r.sugar ?? 0,
+      sodium: r.sodium ?? 0,
+    },
     steps: (r.steps ?? [])
       .sort((a, b) => a.step_number - b.step_number)
       .map((s) => s.description),
@@ -368,24 +385,30 @@ export default function RecipeScreen() {
 
   useEffect(() => {
     setRecipesLoading(true);
-    getRecipes()
+    getRecipes(excludeTools.length > 0 ? { excludeTools: excludeTools.join(',') } : undefined)
       .then((data) => setAllRecipes(data.map(backendToRecipe)))
       .catch(() => setAllRecipes([]))
       .finally(() => setRecipesLoading(false));
-  }, []);
+    // 서버 기준 top3 별도 로드 (전체 목록과 독립적으로 최신 인기순 반영)
+    getTop3Recipes()
+      .then((data) => { if (data.length > 0) setTop3Recipes(data.map(backendToRecipe)); })
+      .catch(() => { /* 실패 시 top3Display 폴백 */ });
+  }, [excludeTools]);
 
-  // Tab 2 음식 검색 — 검색어가 바뀔 때마다 API 호출 (300ms 디바운스)
-  useEffect(() => {
-    if (activeTab !== 2) return;
-    if (!searchText.trim()) { setFoodResults([]); return; }
-    const timer = setTimeout(() => {
-      setFoodSearchLoading(true);
-      searchFoods(searchText)
-        .then(setFoodResults)
-        .finally(() => setFoodSearchLoading(false));
-    }, 300);
-    return () => clearTimeout(timer);
-  }, [searchText, activeTab]);
+  // ─────────────────────────────────────────────────────────────────────
+  // top3Display: 프론트 계산 폴백 — getTop3Recipes() 실패 시 사용
+  // top3Banner: 실제 UI에서 쓰는 값 (서버 API 우선, 없으면 프론트 계산)
+  // ─────────────────────────────────────────────────────────────────────
+  const top3Display = useMemo(
+    () =>
+      [...allRecipes]
+        .sort((a, b) => b.likes - a.likes)
+        .slice(0, 3),
+    [allRecipes],
+  );
+  const top3Banner = top3Recipes.length > 0 ? top3Recipes : top3Display;
+
+
 
   const [cookingMode, setCookingMode] = useState<{ title: string; steps: string[] } | null>(null);
 
@@ -423,18 +446,35 @@ export default function RecipeScreen() {
 
   const filteredRecipes = useMemo(() => {
     const q = searchText.toLowerCase();
-    if (!q) return communityRecipes;
-    return communityRecipes.filter(
-      (r) =>
+    const availableSet = new Set(availableTools);
+
+    return communityRecipes.filter((r) => {
+      const matchesSearch =
+        !q ||
         r.title.toLowerCase().includes(q) ||
-        r.ingredients.some((i) => i.name.toLowerCase().includes(q)),
-    );
-  }, [searchText, communityRecipes]);
+        r.ingredients.some((i) => i.name.toLowerCase().includes(q));
+
+      if (!matchesSearch) return false;
+      if (availableTools.length === 0) return true;
+
+      // When tools are selected, show only recipes whose required tools are all available.
+      // Recipes with no tool metadata are hidden so the filtered list stays explicit.
+      return r.tools.length > 0 && r.tools.every((tool) => availableSet.has(tool));
+    });
+  }, [searchText, communityRecipes, availableTools]);
 
   const favoriteRecipes = useMemo(
     () => communityRecipes.filter((r) => isFavorite(r.id)),
     [favoriteIds, communityRecipes],
   );
+
+  // 인기 레시피 카드 탭 → filteredRecipes에서 해당 아이템으로 스크롤
+  const handleTop3Press = useCallback((recipeId: number) => {
+    const idx = filteredRecipes.findIndex((r) => r.id === recipeId);
+    if (idx >= 0) {
+      recipeListRef.current?.scrollToIndex({ index: idx, animated: true });
+    }
+  }, [filteredRecipes]);
 
   const allIngredientNames = useMemo<string[]>(() => {
     const names = new Set<string>();
@@ -448,16 +488,7 @@ export default function RecipeScreen() {
     return allIngredientNames.filter((n) => n.toLowerCase().includes(q));
   }, [searchText, allIngredientNames]);
 
-  // Tab 2 통합 아이템 목록: API 음식(영양정보O) + 레시피 재료(영양정보X) 합산
-  type Tab2Item = { name: string; apiFood?: ApiFoodInfo };
-  const tab2Items = useMemo<Tab2Item[]>(() => {
-    const apiNames = new Set(foodResults.map((f) => f.name));
-    const recipeOnly = filteredIngredientNames.filter((n) => !apiNames.has(n));
-    return [
-      ...foodResults.map((f) => ({ name: f.name, apiFood: f })),
-      ...recipeOnly.map((n) => ({ name: n })),
-    ];
-  }, [foodResults, filteredIngredientNames]);
+  const tab2Items = filteredIngredientNames;
 
   const recommendedRecipes = useMemo(() => {
     if (selectedIngredients.length < 2) return [];
@@ -467,7 +498,13 @@ export default function RecipeScreen() {
           (ing) => ri.name.includes(ing) || ing.includes(ri.name),
         ),
       ).length;
-      return matchCount >= Math.ceil(recipe.ingredients.length / 2);
+      // 재료 2~3개: ceil(n/2) — 절반 이상
+    // 재료 4개 이상: floor(n/2)+1 — 반 초과 (4개→3개, 6개→4개)
+    const len = recipe.ingredients.length;
+    const threshold = len <= 3
+      ? Math.ceil(len / 2)
+      : Math.floor(len / 2) + 1;
+    return matchCount >= threshold;
     });
   }, [selectedIngredients, allRecipes]);
 
@@ -478,34 +515,65 @@ export default function RecipeScreen() {
   };
 
   const goToRecipe = (recipeId: number): void => {
-    setActiveTab(1);
+    // 1) 검색어 초기화 — 필터 해제해서 대상 레시피가 filteredRecipes 에 포함되게 함
+    setSearchText('');
+    // 2) 대상 카드 펼치기
     setExpandedId(recipeId);
+
     const index = allRecipes.findIndex((r) => r.id === recipeId);
-    if (index !== -1) {
-      setTimeout(() => {
-        recipeListRef.current?.scrollToIndex({ index, animated: true, viewPosition: 0.1 });
-      }, 100);
+    if (index === -1) return;
+
+    if (activeTab === 1 && recipeListRef.current) {
+      // 이미 레시피 탭이 열려있고 FlatList 가 마운트된 경우 → 바로 스크롤
+      recipeListRef.current.scrollToIndex({ index, animated: true, viewPosition: 0.1 });
+    } else {
+      // 다른 탭에서 넘어오는 경우 → pendingScrollIndexRef 에 저장
+      // FlatList 가 마운트될 때 handleListRef 에서 자동으로 스크롤 실행
+      pendingScrollIndexRef.current = index;
+      setActiveTab(1);
     }
   };
 
   // ─────────────────────────────────────────────────────────────────────────
   // toggleLike: 좋아요 토글
-  // 1) 낙관적 업데이트 — UI 즉시 반영 (toggleFavorite)
+  // 1) wasLiked 캡처 → toggleFavorite 낙관적 업데이트 (즉시 하트 반영)
   // 2) POST /recipes/:id/like/:userId 호출
-  // 3) 서버 반환 likes_count로 카드 숫자 동기화
+  // 3) res.liked === wasLiked 이면 서버가 반대로 처리한 것 → toggleFavorite 재호출로 교정
+  //    ※ isFavorite(id)를 async 콜백 내에서 쓰면 stale closure 로 잘못된 값을 읽으므로
+  //       wasLiked (동기 캡처값)만 사용
+  // 4) 서버 likes_count 로 숫자 동기화
+  // 5) API 실패 → toggleFavorite 재호출로 낙관적 업데이트 롤백
   // ─────────────────────────────────────────────────────────────────────────
   const toggleLike = async (id: number): Promise<void> => {
-    toggleFavorite(id); // 낙관적 업데이트 (즉시 UI 반영)
-    if (currentUser) {
-      try {
-        const res = await toggleRecipeLike(id, currentUser.id);
-        // 서버 likes_count로 동기화
-        setAllRecipes((prev) =>
-          prev.map((r) => (r.id === id ? { ...r, likes: res.likes_count } : r))
-        );
-      } catch {
-        // 실패해도 로컬 상태 유지
+    // 로그인 안 된 경우 — 하트 건드리지 않고 조용히 종료
+    if (!currentUser) return;
+
+    const wasLiked = isFavorite(id); // 동기적으로 현재 상태 캡처
+    toggleFavorite(id);              // 낙관적 업데이트 — 하트 즉시 반영
+
+    try {
+      const res = await toggleRecipeLike(id, currentUser.id);
+
+      // res.liked === wasLiked 이면 서버가 기대와 반대로 토글한 것
+      // (예: 이미 좋아요 상태였는데 로컬엔 없었던 경우 → 서버는 unlike 처리)
+      // → 낙관적 업데이트를 되돌려 서버 상태와 맞춤
+      if (res.liked === wasLiked) {
+        toggleFavorite(id);
       }
+
+      // 서버 likes_count 로 카드 숫자 동기화
+      setAllRecipes((prev) =>
+        prev.map((r) => (r.id === id ? { ...r, likes: res.likes_count } : r)),
+      );
+
+      // 좋아요 변경 후 서버 기준 top3 재조회 (순위가 바뀔 수 있으므로)
+      getTop3Recipes()
+        .then((data) => { if (data.length > 0) setTop3Recipes(data.map(backendToRecipe)); })
+        .catch(() => {});
+
+    } catch {
+      // API 실패 → 낙관적 업데이트 롤백
+      toggleFavorite(id);
     }
   };
 
@@ -586,6 +654,9 @@ export default function RecipeScreen() {
                   <NutriBadge label="탄" value={n.carbs} color="#F6A623" />
                   <NutriBadge label="단" value={n.protein} color="#2ECC71" />
                   <NutriBadge label="지" value={n.fat} color="#9B59B6" />
+                  <NutriBadge label="섬유" value={n.fiber ?? 0} color="#27AE60" />
+                  <NutriBadge label="당" value={n.sugar ?? 0} color="#E67E22" />
+                  <NutriBadge label="나트륨" value={n.sodium ?? 0} color="#7F8C8D" unit="mg" />
                 </View>
               </View>
             ) : (
@@ -655,23 +726,22 @@ export default function RecipeScreen() {
 
   // ── 음식·재료 통합 카드 (Tab 2) ──
   // 카드 본체 탭 = 선택(레시피 추천용) / + 버튼 = 식단에 추가
-  const FoodIngredientCard = ({ name, apiFood }: { name: string; apiFood?: ApiFoodInfo }) => {
+  const FoodIngredientCard = ({ name }: { name: string }) => {
     const isSelected = selectedIngredients.includes(name);
-    const hasNutrition = !!apiFood;
     const asFood: Food = {
-      id: apiFood?.id ?? 0,
+      id: 0,
       name,
       emoji: '🍽️',
       category: '음식',
-      per: `${apiFood?.servingSize ?? 100}g`,
+      per: '직접 입력',
       nutrition: {
-        calories: apiFood?.calories ?? 0,
-        carbs: apiFood?.carbs ?? 0,
-        protein: apiFood?.protein ?? 0,
-        fat: apiFood?.fat ?? 0,
-        fiber: apiFood?.fiber ?? 0,
-        sugar: apiFood?.sugar ?? 0,
-        sodium: apiFood?.sodium ?? 0,
+        calories: 0,
+        carbs: 0,
+        protein: 0,
+        fat: 0,
+        fiber: 0,
+        sugar: 0,
+        sodium: 0,
       },
     };
     return (
@@ -688,18 +758,7 @@ export default function RecipeScreen() {
             <Text style={styles.fiName} numberOfLines={1}>{name}</Text>
             {isSelected && <Text style={styles.fiCheckBadge}>✓ 선택됨</Text>}
           </View>
-          {hasNutrition ? (
-            <View style={styles.calRow}>
-              <Text style={styles.fiCal}>🔥 {apiFood!.calories} kcal</Text>
-              <View style={styles.miniNutriRow}>
-                <NutriBadge label="탄" value={apiFood!.carbs} color="#F6A623" />
-                <NutriBadge label="단" value={apiFood!.protein} color="#2ECC71" />
-                <NutriBadge label="지" value={apiFood!.fat} color="#9B59B6" />
-              </View>
-            </View>
-          ) : (
-            <Text style={styles.fiNoNutri}>✏️ 추가 시 직접 입력</Text>
-          )}
+          <Text style={styles.fiNoNutri}>✏️ 추가 시 직접 입력</Text>
         </View>
 
         {/* + 식단 추가 버튼 */}
@@ -746,17 +805,29 @@ export default function RecipeScreen() {
           steps: (res.steps ?? [])
             .sort((a, b) => a.step_number - b.step_number)
             .map((s) => s.description),
-          totalNutrition: { calories: 0, carbs: 0, protein: 0, fat: 0 },
+          totalNutrition: {
+            calories: res.calories ?? 0,
+            carbs: res.carbs ?? 0,
+            protein: res.protein ?? 0,
+            fat: res.fat ?? 0,
+            fiber: res.fiber ?? 0,
+            sugar: res.sugar ?? 0,
+            sodium: res.sodium ?? 0,
+          },
           createdAt: new Date().toLocaleDateString('ko-KR'),
-          sharedRecipeId: res.id,  // 백엔드가 이미 저장한 레시피 ID
+          // backendId: DB에 저장된 ID (비공개 상태). 공개하기 버튼으로 is_public 전환 시 사용
+          backendId: res.id,
         };
         setAnalyzedRecipe(newRecipe);
       } else {
+        const errMsg = res.message ?? '';
+        const detail = (errMsg && errMsg !== 'BACKEND_NOT_READY') ? `\n\n서버 응답: ${errMsg}` : '';
         Alert.alert(
           '분석 실패 😥',
           '이 영상에서 레시피를 찾지 못했어요.\n\n' +
           '✅ 잘 되는 영상:\n• 한국어 자막이 있는 요리 영상\n• 말로 설명하는 쿠킹 채널\n\n' +
-          '❌ 안 되는 영상:\n• 자막 없는 영상\n• 배경 음악만 있는 영상',
+          '❌ 안 되는 영상:\n• 자막 없는 영상\n• 배경 음악만 있는 영상' +
+          detail,
         );
       }
     } catch {
@@ -772,16 +843,12 @@ export default function RecipeScreen() {
   const handleSaveUserRecipe = () => {
     if (!analyzedRecipe) return;
     const title = analyzedRecipe.title;
+    // 비공개 상태로 나만의 레시피에만 저장 (backendId로 DB 연결 유지)
     addUserRecipe(analyzedRecipe);
-    // YouTube 분석 레시피는 백엔드가 analyzeYoutubeRecipe 호출 시점에 이미 DB에 저장함
-    // → 수동으로 allRecipes에 추가하면 중복 표시됨
-    // → 대신 getRecipes()를 다시 호출해서 서버 기준으로 목록 갱신
-    getRecipes()
-      .then((data) => setAllRecipes(data.map(backendToRecipe)))
-      .catch(() => {});
     setAnalyzedRecipe(null);
     setYoutubeUrl('');
-    Alert.alert('저장 완료! 🎉', `"${title}" 레시피가 나만의 레시피와 레시피 탭에 추가됐어요.`);
+    Alert.alert('저장 완료! 🎉', `"${title}" 레시피가 나만의 레시피에 저장됐어요.
+공개하려면 나만의 레시피에서 공개하기 버튼을 눌러주세요.`);
   };
 
   // 직접 작성 / 수정 후 저장
@@ -858,16 +925,41 @@ export default function RecipeScreen() {
             const dto = {
               title: recipe.title,
               content: recipe.steps.join('\n'),
-              ingredients: recipe.ingredients.map((i) => i.name),
+              // 재료명 + 양을 함께 전송 → 백엔드 AI 영양소 추정 정확도 향상
+              ingredients: recipe.ingredients.map((i) => ({ name: i.name, amount: i.amount || '적당량' })),
               cooking_tools: [] as string[],
               steps: recipe.steps.map((s, idx) => ({ step_number: idx + 1, description: s })),
             };
             try {
               const result = await createRecipe(String(currentUser.id), dto);
-              const published = { ...recipe, sharedRecipeId: result.id };
+              // 백엔드 AI가 계산한 영양소를 로컬 레시피에도 반영
+              const nutrition = {
+                calories: result.calories ?? 0,
+                carbs: result.carbs ?? 0,
+                protein: result.protein ?? 0,
+                fat: result.fat ?? 0,
+                fiber: result.fiber ?? 0,
+                sugar: result.sugar ?? 0,
+                sodium: result.sodium ?? 0,
+              };
+              // result.is_public이 true일 때만 공개됨 배지 표시
+              // 백엔드가 is_public: false로 응답하면 비공개 상태 유지
+              const isActuallyPublic = result.is_public === true;
+              const published = {
+                ...recipe,
+                sharedRecipeId: isActuallyPublic ? result.id : undefined,
+                totalNutrition: nutrition,
+              };
               updateUserRecipe(published);
-              setAllRecipes((prev) => [backendToRecipe(result), ...prev]);
-              Alert.alert('공개 완료! 🎉', `"${recipe.title}" 레시피가 레시피 탭에 공개됐어요.`);
+              if (isActuallyPublic) {
+                setAllRecipes((prev) => [backendToRecipe(result), ...prev]);
+                Alert.alert('공개 완료! 🎉', `"${recipe.title}" 레시피가 레시피 탭에 공개됐어요.`);
+              } else {
+                // 백엔드가 비공개로 저장한 경우 (is_public: false 기본값)
+                // 백엔드에서 is_public 전환 API가 구현되면 이 분기 사라짐
+                Alert.alert('저장됐어요', `"${recipe.title}"이 서버에 저장됐어요.
+공개 처리는 백엔드 업데이트 후 지원될 예정이에요.`);
+              }
             } catch {
               Alert.alert('오류', '공개에 실패했어요. 잠시 후 다시 시도해주세요.');
             }
@@ -979,6 +1071,56 @@ export default function RecipeScreen() {
             </TouchableOpacity>
           ) : null}
         </View>
+
+        {/* 사용 가능한 조리기구 필터 (백엔드에는 선택하지 않은 도구를 excludeTools로 전달) */}
+        {activeTab === 1 && (
+          <View style={{ paddingHorizontal: spacing.md, paddingBottom: 6 }}>
+            <TouchableOpacity
+              onPress={() => setToolFilterVisible(v => !v)}
+              style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 6 }}
+            >
+              <Text style={{ fontSize: 13, color: availableTools.length > 0 ? colors.primary : colors.textLight, fontWeight: '600' }}>
+                🍳 조리기구 필터 {availableTools.length > 0 ? `(${availableTools.length}개 사용 가능)` : ''}
+              </Text>
+              <Text style={{ fontSize: 11, color: colors.textLight }}>{toolFilterVisible ? '▲' : '▼'}</Text>
+            </TouchableOpacity>
+            {toolFilterVisible && (
+              <View>
+                <Text style={{ fontSize: 11, color: colors.textLight, marginBottom: 6 }}>사용 가능한 조리기구를 선택하세요</Text>
+                <ScrollView horizontal showsHorizontalScrollIndicator={false}>
+                  <View style={{ flexDirection: 'row', gap: 6 }}>
+                    {COOKING_TOOLS.map((tool) => {
+                      const isAvailable = availableTools.includes(tool);
+                      return (
+                        <TouchableOpacity
+                          key={tool}
+                          onPress={() => setAvailableTools(prev =>
+                            isAvailable ? prev.filter(t => t !== tool) : [...prev, tool]
+                          )}
+                          style={{
+                            paddingHorizontal: 12, paddingVertical: 5,
+                            borderRadius: 14, borderWidth: 1,
+                            borderColor: isAvailable ? colors.primary : colors.border,
+                            backgroundColor: isAvailable ? colors.primaryLight : '#fff',
+                          }}
+                        >
+                          <Text style={{ fontSize: 12, color: isAvailable ? colors.primary : colors.text, fontWeight: isAvailable ? '700' : '400' }}>
+                            {isAvailable ? '✓ ' : ''}{tool}
+                          </Text>
+                        </TouchableOpacity>
+                      );
+                    })}
+                  </View>
+                </ScrollView>
+                {availableTools.length > 0 && (
+                  <TouchableOpacity onPress={() => setAvailableTools([])} style={{ marginTop: 6 }}>
+                    <Text style={{ fontSize: 12, color: colors.primary }}>필터 초기화</Text>
+                  </TouchableOpacity>
+                )}
+              </View>
+            )}
+          </View>
+        )}
       </View>
 
       {/* ── 탭 콘텐츠 ── */}
@@ -1002,16 +1144,59 @@ export default function RecipeScreen() {
         recipesLoading ? <LoadingView /> : (
           <FlatList
             key="recipe-list"
-            ref={recipeListRef}
+            ref={(ref) => {
+              recipeListRef.current = ref;
+              // FlatList 가 마운트됐을 때 대기 중인 스크롤 요청이 있으면 실행
+              if (ref && pendingScrollIndexRef.current !== null) {
+                const idx = pendingScrollIndexRef.current;
+                pendingScrollIndexRef.current = null;
+                // 초기 레이아웃 완료 대기 (짧은 지연으로 충분)
+                setTimeout(() => {
+                  ref.scrollToIndex({ index: idx, animated: true, viewPosition: 0.1 });
+                }, 150);
+              }
+            }}
             data={filteredRecipes}
             keyExtractor={(item) => String(item.id)}
             renderItem={({ item }) => <RecipeCard item={item} />}
             contentContainerStyle={styles.list}
             showsVerticalScrollIndicator={false}
+            ListHeaderComponent={top3Banner.length > 0 ? (
+              <View style={styles.top3Card}>
+                <Text style={styles.top3Title}>🏆 인기 레시피</Text>
+                {top3Banner.map((r, i) => (
+                  <TouchableOpacity
+                    key={r.id}
+                    style={styles.top3Row}
+                    activeOpacity={0.7}
+                    onPress={() => handleTop3Press(r.id)}
+                  >
+                    <Text style={styles.top3Rank}>{['🥇','🥈','🥉'][i]}</Text>
+                    <View style={{ flex: 1 }}>
+                      <Text style={styles.top3Name} numberOfLines={1}>{r.title}</Text>
+                      <Text style={styles.top3Meta}>
+                        ❤️ {r.likes} · 👤 {r.creatorName ?? '익명'}{r.totalNutrition.calories ? ` · 🔥 ${r.totalNutrition.calories}kcal` : ''}
+                      </Text>
+                    </View>
+                    <Text style={styles.top3Arrow}>›</Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+            ) : null}
             onScrollToIndexFailed={(info) => {
+              // 아이템 높이 미계측 시 averageItemLength 로 오프셋 추정 후 이동
+              recipeListRef.current?.scrollToOffset({
+                offset: info.averageItemLength * info.index,
+                animated: true,
+              });
+              // 이동 후 정밀 교정 재시도
               setTimeout(() => {
-                recipeListRef.current?.scrollToIndex({ index: info.index, animated: true });
-              }, 300);
+                recipeListRef.current?.scrollToIndex({
+                  index: info.index,
+                  animated: false,
+                  viewPosition: 0.1,
+                });
+              }, 400);
             }}
             ListEmptyComponent={
               <View style={styles.emptyBox}>
@@ -1025,20 +1210,12 @@ export default function RecipeScreen() {
         <FlatList
           key="food-ingredient-list"
           data={tab2Items}
-          keyExtractor={(item) => `fi-${item.name}`}
-          renderItem={({ item }) => <FoodIngredientCard name={item.name} apiFood={item.apiFood} />}
+          keyExtractor={(item) => `fi-${item}`}
+          renderItem={({ item }) => <FoodIngredientCard name={item} />}
           contentContainerStyle={styles.list}
           showsVerticalScrollIndicator={false}
           ListHeaderComponent={
             <>
-              {/* 로딩 인디케이터 */}
-              {foodSearchLoading && (
-                <View style={styles.tab2LoadingRow}>
-                  <ActivityIndicator size="small" color={colors.primary} />
-                  <Text style={styles.tab2LoadingText}>음식 검색 중...</Text>
-                </View>
-              )}
-
               {/* 선택된 항목 + 레시피 추천 */}
               {selectedIngredients.length > 0 && (
                 <View style={styles.selectedBox}>
@@ -1095,7 +1272,7 @@ export default function RecipeScreen() {
             </>
           }
           ListEmptyComponent={
-            recipesLoading || foodSearchLoading ? <LoadingView /> : (
+            recipesLoading ? <LoadingView /> : (
               <View style={styles.emptyBox}>
                 <Text style={styles.emptyIcon}>🥬</Text>
                 <Text style={styles.emptyTitle}>음식·재료가 없어요</Text>
@@ -1148,9 +1325,14 @@ export default function RecipeScreen() {
               onPress={handleAnalyzeYoutube}
               disabled={analyzing}
             >
-              {analyzing
-                ? <ActivityIndicator color="#fff" size="small" />
-                : <Text style={styles.analyzeBtnText}>🤖 레시피 분석하기</Text>}
+              {analyzing ? (
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                  <ActivityIndicator color="#fff" size="small" />
+                  <Text style={[styles.analyzeBtnText, { fontSize: 13 }]}>분석 중... (최대 2분 소요)</Text>
+                </View>
+              ) : (
+                <Text style={styles.analyzeBtnText}>🤖 레시피 분석하기</Text>
+              )}
             </TouchableOpacity>
           </View>
 
@@ -1169,6 +1351,9 @@ export default function RecipeScreen() {
                 <NutriBadge label="탄수화물" value={analyzedRecipe.totalNutrition.carbs} color="#F6A623" />
                 <NutriBadge label="단백질" value={analyzedRecipe.totalNutrition.protein} color="#2ECC71" />
                 <NutriBadge label="지방" value={analyzedRecipe.totalNutrition.fat} color="#9B59B6" />
+                <NutriBadge label="식이섬유" value={analyzedRecipe.totalNutrition.fiber ?? 0} color="#27AE60" />
+                <NutriBadge label="당류" value={analyzedRecipe.totalNutrition.sugar ?? 0} color="#E67E22" />
+                <NutriBadge label="나트륨" value={analyzedRecipe.totalNutrition.sodium ?? 0} color="#7F8C8D" unit="mg" />
               </View>
               <Text style={styles.expandTitle}>📋 재료</Text>
               <View style={styles.ingGrid}>
@@ -1268,6 +1453,9 @@ export default function RecipeScreen() {
                             <NutriBadge label="탄" value={n.carbs} color="#F6A623" />
                             <NutriBadge label="단" value={n.protein} color="#2ECC71" />
                             <NutriBadge label="지" value={n.fat} color="#9B59B6" />
+                            <NutriBadge label="섬유" value={n.fiber ?? 0} color="#27AE60" />
+                            <NutriBadge label="당" value={n.sugar ?? 0} color="#E67E22" />
+                            <NutriBadge label="나트륨" value={n.sodium ?? 0} color="#7F8C8D" unit="mg" />
                           </View>
                         </View>
                       ) : null}
@@ -1491,8 +1679,22 @@ const styles = StyleSheet.create({
   cardMeta: { fontSize: 12, color: colors.textLight, marginBottom: 4 },
   cardCreator: { fontSize: 11, color: colors.textLight, marginTop: 1, marginBottom: 2, fontStyle: 'italic' },
   cardCal: { fontSize: 13, color: colors.primary, fontWeight: '700', marginRight: spacing.sm },
+  top3Card: {
+    backgroundColor: '#fff',
+    borderRadius: borderRadius.md,
+    padding: spacing.md,
+    marginBottom: spacing.sm,
+    ...shadow.small,
+  },
+  top3Title: { fontSize: 15, fontWeight: '800', color: colors.text, marginBottom: spacing.sm },
+  top3Row: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingVertical: 6,
+    borderBottomWidth: 1, borderBottomColor: colors.border },
+  top3Rank: { fontSize: 18 },
+  top3Name: { fontSize: 13, fontWeight: '700', color: colors.text },
+  top3Meta: { fontSize: 11, color: colors.textLight, marginTop: 2 },
+  top3Arrow: { fontSize: 20, color: colors.textLight, fontWeight: '300', marginLeft: 4 },
   calRow: { flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', gap: 4 },
-  miniNutriRow: { flexDirection: 'row', gap: 4 },
+  miniNutriRow: { flexDirection: 'row', flexWrap: 'nowrap', gap: 3 },
   noNutriText: { fontSize: 11, color: colors.textLight, fontStyle: 'italic' },
   expandArrow: {
     fontSize: 24, color: colors.textLight, fontWeight: '300',

@@ -98,15 +98,6 @@ export const saveMealLog = async (userId: string, mealData: MealLogRequest): Pro
 };
 
 // ============================================================
-// [기능] 식단 기록 삭제
-// [화면] HomeScreen — 식단 항목 삭제 버튼 누르면 호출됨
-// [엔드포인트] DELETE /diet/log/:logId
-// ============================================================
-export const deleteMealLog = async (logId: number): Promise<void> => {
-  await api.delete(`/diet/log/${logId}`);
-};
-
-// ============================================================
 // [기능] 내 식단 기록 조회
 // [화면] HomeScreen, CalendarScreen — 오늘/특정 날짜 식단 불러올 때 사용
 // [엔드포인트] GET /diet/history/:userId?startDate=YYYY-MM-DD&endDate=YYYY-MM-DD
@@ -152,7 +143,30 @@ export interface BackendRecipe {
   ingredients: { id: number; name: string }[];
   cooking_tools: { id: number; name: string }[];
   steps?: { step_number: number; description: string; step_img?: string }[];
+  // 백엔드 업데이트로 추가된 영양소 필드 (AI가 재료 기반으로 추정)
+  calories?: number;
+  carbs?: number;
+  protein?: number;
+  fat?: number;
+  fiber?: number;
+  sugar?: number;
+  sodium?: number;
+  is_public?: boolean;
 }
+
+// ============================================================
+// [기능] 인기 레시피 top3 조회 (좋아요 수 기준)
+// [화면] HomeScreen — 인기 레시피 섹션
+// [엔드포인트] GET /recipes/top3
+// ============================================================
+export const getTop3Recipes = async (): Promise<BackendRecipe[]> => {
+  try {
+    const response = await api.get<BackendRecipe[]>('/recipes/top3');
+    return response.data;
+  } catch {
+    return [];
+  }
+};
 
 export const getRecipes = async (params?: {
   search?: string;
@@ -203,7 +217,7 @@ export const createRecipe = async (userId: string, dto: {
   title: string;
   content?: string;
   thumbnail_img?: string;
-  ingredients: string[];
+  ingredients: string[] | { name: string; amount?: string }[];
   cooking_tools: string[];
   steps: { step_number: number; description: string }[];
 }): Promise<BackendRecipe> => {
@@ -224,6 +238,15 @@ interface YoutubeRecipeResponse {
   steps?: { step_number: number; description: string; step_img?: string }[];
   ingredients?: { id: number; name: string }[];
   cooking_tools?: { id: number; name: string }[];
+  // 백엔드 업데이트로 추가된 영양소 필드
+  calories?: number;
+  carbs?: number;
+  protein?: number;
+  fat?: number;
+  fiber?: number;
+  sugar?: number;
+  sodium?: number;
+  is_public?: boolean;
   message?: string;
 }
 
@@ -233,29 +256,14 @@ interface YoutubeRecipeResponse {
 // [엔드포인트] POST /recipes/api/youtube/create
 // [바디] { userId: string, videoUrl: string }
 // ============================================================
-// ============================================================
-// [기능] 음식 이름 검색 — dish_item 테이블에서 조회
-// [화면] RecipeScreen '재료·음식' 탭 — 검색창 입력 시 호출
-// [엔드포인트] GET /foods/search?query=닭가슴살
-// ⚠️ 백엔드팀 할 일: FoodsController + GET /foods/search 엔드포인트 추가 필요
-//    (dish_item 테이블에서 dish_name LIKE %query% 로 검색)
-// ============================================================
-export const searchFoods = async (query: string): Promise<ApiFoodInfo[]> => {
-  if (!query.trim()) return [];
-  try {
-    const response = await api.get<ApiFoodInfo[]>('/diet/foods/search', { params: { query } });
-    return response.data;
-  } catch {
-    return []; // 백엔드 미연결 시 빈 배열 반환
-  }
-};
-
 export const analyzeYoutubeRecipe = async (userId: string, videoUrl: string): Promise<YoutubeRecipeResponse> => {
   try {
     const response = await api.post<YoutubeRecipeResponse>('/recipes/api/youtube/create', { userId, videoUrl });
     return { success: true, ...response.data };
-  } catch {
-    return { success: false, message: 'BACKEND_NOT_READY' };
+  } catch (error: any) {
+    const msg = error?.response?.data?.message ?? error?.message ?? 'UNKNOWN';
+    console.error('[YouTube 분석 실패]', msg, error?.response?.status);
+    return { success: false, message: msg };
   }
 };
 
@@ -288,7 +296,6 @@ export const getAiRecommend = async (userId: string): Promise<AiRecommendRespons
   return response.data;
 };
 
-// ============================================================
 // [기능] 주간 식단 AI 리포트
 // [화면] HomeScreen — '주간 식단 AI 리포트' 버튼 누르면 호출됨
 // [엔드포인트] GET /diet/report/weekly/:userId

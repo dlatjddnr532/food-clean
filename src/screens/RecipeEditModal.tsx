@@ -250,7 +250,7 @@ export function RecipeEditModal({ visible, initial, userId, ingredientSuggestion
                         </TouchableOpacity>
                       ))}
                       <TouchableOpacity style={eStyles.dropdownManual} onPress={() => { setSearchResults([]); setActiveIngIdx(null); }}>
-                        <Text style={eStyles.dropdownManualTxt}>"{ing.name}" 직접 입력으로 사용 →</Text>
+                        <Text style={eStyles.dropdownManualTxt}>{`"${ing.name}" 직접 입력으로 사용 →`}</Text>
                       </TouchableOpacity>
                     </View>
                   )}

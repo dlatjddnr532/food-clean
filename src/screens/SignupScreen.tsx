@@ -22,7 +22,7 @@ type Props = {
 const STEPS = ['계정 정보', '신체 정보'];
 
 export default function SignupScreen({ navigation }: Props) {
-  const { signup, login } = useApp();
+  const { signup, login, updateProfile } = useApp();
   const [step, setStep] = useState(0);
   const [loading, setLoading] = useState(false);
 
@@ -84,6 +84,9 @@ export default function SignupScreen({ navigation }: Props) {
         weight,
         activityLevel: 'moderate',
       });
+
+      // 4단계: AppContext 프로필에도 실제 입력값 즉시 반영 (재시작 후에도 유지됨)
+      updateProfile({ gender, age, height, weight, activityLevel: 'moderate', goalType: 'maintain' });
 
       Alert.alert('가입 완료! 🎉', '앱을 시작하세요!');
     } catch {

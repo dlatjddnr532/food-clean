@@ -1,10 +1,11 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect, useCallback } from 'react';
 import {
-  View, Text, StyleSheet, ScrollView, TouchableOpacity, Modal,
+  View, Text, StyleSheet, ScrollView, TouchableOpacity, Modal, ActivityIndicator,
 } from 'react-native';
 import { colors, spacing, borderRadius, shadow } from '../utils/theme';
 import { useApp } from '../context/AppContext';
 import { MealType, MealLogEntry } from '../types';
+import { getMealLogs } from '../api/diet';
 
 // ─── 유틸 ──────────────────────────────────────────────────────────────────
 // toDateKey: Date → "YYYY-MM-DD" 문자열 변환
@@ -69,17 +70,78 @@ export default function CalendarScreen({ visible, onClose }: CalendarProps) {
   // 선택된 날짜
   const [selectedKey, setSelectedKey] = useState<string>(todayKey());
 
+  // ─────────────────────────────────────────────────────────────────────
+  // 백엔드 history 캐시 — 월별로 한 번만 조회해서 저장
+  // key: "YYYY-MM", value: 해당 월에 조회된 MealLogEntry 배열
+  // ─────────────────────────────────────────────────────────────────────
+  const [historyCache, setHistoryCache] = useState<Record<string, MealLogEntry[]>>({});
+  const [historyLoading, setHistoryLoading] = useState(false);
+
+  // 월별 백엔드 history 조회 — 이미 캐시된 달은 재요청 안 함
+  const fetchMonthHistory = useCallback(async (year: number, month: number) => {
+    if (!currentUser) return;
+    const cacheKey = `${year}-${String(month + 1).padStart(2, '0')}`;
+    if (historyCache[cacheKey] !== undefined) return; // 이미 로드됨
+
+    const firstDay = `${year}-${String(month + 1).padStart(2, '0')}-01`;
+    const lastDate = new Date(year, month + 1, 0).getDate();
+    const lastDay  = `${year}-${String(month + 1).padStart(2, '0')}-${String(lastDate).padStart(2, '0')}`;
+
+    setHistoryLoading(true);
+    try {
+      const res = await getMealLogs(currentUser.id, firstDay, lastDay);
+      const entries: MealLogEntry[] = res.rawLogs.map((l) => ({
+        id: l.id,
+        userId: String(l.userId),
+        date: l.eatDate,
+        mealType: l.mealType,
+        food: {
+          id: l.id,
+          name: l.foodName,
+          emoji: '🍽️',
+          category: '기타',
+          per: `${l.quantity}g`,
+          nutrition: {
+            calories: l.calories, carbs: l.carbs, protein: l.protein, fat: l.fat,
+            fiber: l.fiber ?? 0, sugar: l.sugar ?? 0, sodium: l.sodium ?? 0,
+          },
+        },
+      }));
+      setHistoryCache((prev) => ({ ...prev, [cacheKey]: entries }));
+    } catch {
+      // 실패 시 빈 배열 캐시 (무한 재요청 방지)
+      setHistoryCache((prev) => ({ ...prev, [cacheKey]: [] }));
+    } finally {
+      setHistoryLoading(false);
+    }
+  }, [currentUser, historyCache]);
+
+  // 달 이동 시 자동으로 해당 월 데이터 로드
+  useEffect(() => {
+    fetchMonthHistory(viewYear, viewMonth);
+  }, [viewYear, viewMonth]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // AppContext mealLogs(오늘/최근 7일) + 백엔드 history 캐시 병합
+  // — id 중복 제거해서 통합된 전체 로그 목록 생성
+  const allLogs = useMemo(() => {
+    const cacheKey = `${viewYear}-${String(viewMonth + 1).padStart(2, '0')}`;
+    const fetched = historyCache[cacheKey] ?? [];
+    const existingIds = new Set(mealLogs.map((l) => l.id));
+    const extra = fetched.filter((l) => !existingIds.has(l.id));
+    return [...mealLogs, ...extra].filter((l) => l.userId === currentUser?.id);
+  }, [mealLogs, historyCache, viewYear, viewMonth, currentUser]);
+
   // 로그가 있는 날짜 집합
   const logDateSet = useMemo(() => {
     const set = new Set<string>();
-    mealLogs.forEach((l) => { if (l.userId === currentUser?.id) set.add(l.date); });
+    allLogs.forEach((l) => set.add(l.date));
     return set;
-  }, [mealLogs, currentUser]);
+  }, [allLogs]);
 
   // 선택된 날짜의 로그
   const selectedLogs = useMemo(
-    () => mealLogs.filter((l) => l.date === selectedKey && l.userId === currentUser?.id),
-    [mealLogs, selectedKey, currentUser],
+    () => allLogs.filter((l) => l.date === selectedKey),
+    [allLogs, selectedKey],
   );
 
   // 영양소 합계
@@ -218,9 +280,20 @@ export default function CalendarScreen({ visible, onClose }: CalendarProps) {
 
           {/* 선택된 날짜 기록 */}
           <View style={styles.section}>
-            <Text style={styles.sectionTitle}>{selectedLabel}</Text>
+            <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: spacing.md }}>
+              <Text style={styles.sectionTitle}>{selectedLabel}</Text>
+              {historyLoading && (
+                <ActivityIndicator size="small" color={colors.primary} style={{ marginLeft: 8 }} />
+              )}
+            </View>
 
-            {selectedLogs.length === 0 ? (
+            {historyLoading ? (
+              // 백엔드에서 이달 데이터 로딩 중
+              <View style={styles.emptyCard}>
+                <ActivityIndicator size="large" color={colors.primary} />
+                <Text style={[styles.emptyText, { marginTop: spacing.sm }]}>식단 기록 불러오는 중...</Text>
+              </View>
+            ) : selectedLogs.length === 0 ? (
               <View style={styles.emptyCard}>
                 <Text style={styles.emptyEmoji}>🍽️</Text>
                 <Text style={styles.emptyText}>이 날의 식단 기록이 없어요</Text>

@@ -131,7 +131,8 @@ export interface UserRecipe {
   steps: string[];
   totalNutrition: NutritionInfo;
   createdAt: string;
-  sharedRecipeId?: number;  // 공유 후 백엔드에서 부여받은 레시피 ID
+  sharedRecipeId?: number;  // 공개 상태인 레시피의 백엔드 ID (공개됨 배지용)
+  backendId?: number;       // DB에 저장된 ID (비공개 포함, 삭제/공개 전환 시 사용)
 }
 
 export interface AiFoodResult {

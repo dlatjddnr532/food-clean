@@ -11,7 +11,7 @@ import {
   MealType, Food, DailyGoals, SignupData, ActivityLevel, GoalType, UserRecipe,
   Supplement, SupplementTakenLog, SupplementTime,
 } from '../types';
-import { getMealLogs, deleteMealLog, getHomeDashboard } from '../api/diet';
+import { getMealLogs, getHomeDashboard } from '../api/diet';
 
 const STORAGE_KEY_USER         = '@food_app:user';
 const STORAGE_KEY_TOKEN        = '@food_app:token';
@@ -20,6 +20,7 @@ const STORAGE_KEY_FAVORITES    = '@food_app:favoriteIds';
 const STORAGE_KEY_SUPPLEMENTS  = '@food_app:supplements';
 const STORAGE_KEY_SUPP_LOGS    = '@food_app:supplementLogs';
 const STORAGE_KEY_WATER_LOGS   = '@food_app:waterLogs';
+const STORAGE_KEY_DELETED_IDS  = '@food_app:deletedLogIds'; // 서버 DELETE 미지원 대비 로컬 삭제 ID 보관
 
 const AppContext = createContext<AppContextType | null>(null);
 
@@ -170,20 +171,27 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
             startD.setDate(startD.getDate() - 6);
             const start = `${startD.getFullYear()}-${String(startD.getMonth() + 1).padStart(2, '0')}-${String(startD.getDate()).padStart(2, '0')}`;
             const history = await getMealLogs(user.id, start, end);
-            const logs: MealLogEntry[] = history.rawLogs.map((l) => ({
-              id: l.id,
-              userId: String(l.userId),
-              date: l.eatDate,
-              mealType: l.mealType,
-              food: {
-                id: l.id, name: l.foodName, emoji: '🍽️', category: '기타',
-                per: `${l.quantity}g`,
-                nutrition: {
-                  calories: l.calories, carbs: l.carbs, protein: l.protein, fat: l.fat,
-                  fiber: l.fiber ?? 0, sugar: l.sugar ?? 0, sodium: l.sodium ?? 0,
+            // 삭제된 로그 ID 불러와서 필터링 (백엔드 DELETE 미구현 대응)
+            const rawDeletedIds: number[] = JSON.parse(
+              (await AsyncStorage.getItem(STORAGE_KEY_DELETED_IDS)) ?? '[]'
+            );
+            const deletedIdSet = new Set(rawDeletedIds);
+            const logs: MealLogEntry[] = history.rawLogs
+              .filter((l) => !deletedIdSet.has(l.id))
+              .map((l) => ({
+                id: l.id,
+                userId: String(l.userId),
+                date: l.eatDate,
+                mealType: l.mealType,
+                food: {
+                  id: l.id, name: l.foodName, emoji: '🍽️', category: '기타',
+                  per: `${l.quantity}g`,
+                  nutrition: {
+                    calories: l.calories, carbs: l.carbs, protein: l.protein, fat: l.fat,
+                    fiber: l.fiber ?? 0, sugar: l.sugar ?? 0, sodium: l.sodium ?? 0,
+                  },
                 },
-              },
-            }));
+              }));
             setMealLogs(logs);
           } catch { /* 식단 로드 실패해도 로그인 유지 */ }
 
@@ -241,28 +249,35 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           startD.setDate(startD.getDate() - 6);
           const start = `${startD.getFullYear()}-${String(startD.getMonth() + 1).padStart(2, '0')}-${String(startD.getDate()).padStart(2, '0')}`;
           const history = await getMealLogs(String(res.id), start, end);
-          const logs: MealLogEntry[] = history.rawLogs.map((l) => ({
-            id: l.id,
-            userId: String(l.userId),
-            date: l.eatDate, // YYYY-MM-DD
-            mealType: l.mealType,
-            food: {
+          // 삭제된 로그 ID 불러와서 필터링 (백엔드 DELETE 미구현 대응)
+          const rawDeletedIds2: number[] = JSON.parse(
+            (await AsyncStorage.getItem(STORAGE_KEY_DELETED_IDS)) ?? '[]'
+          );
+          const deletedIdSet2 = new Set(rawDeletedIds2);
+          const logs: MealLogEntry[] = history.rawLogs
+            .filter((l) => !deletedIdSet2.has(l.id))
+            .map((l) => ({
               id: l.id,
-              name: l.foodName,
-              emoji: '🍽️',
-              category: '기타',
-              per: `${l.quantity}g`,
-              nutrition: {
-                calories: l.calories,
-                carbs: l.carbs,
-                protein: l.protein,
-                fat: l.fat,
-                fiber: l.fiber ?? 0,
-                sugar: l.sugar ?? 0,
-                sodium: l.sodium ?? 0,
+              userId: String(l.userId),
+              date: l.eatDate, // YYYY-MM-DD
+              mealType: l.mealType,
+              food: {
+                id: l.id,
+                name: l.foodName,
+                emoji: '🍽️',
+                category: '기타',
+                per: `${l.quantity}g`,
+                nutrition: {
+                  calories: l.calories,
+                  carbs: l.carbs,
+                  protein: l.protein,
+                  fat: l.fat,
+                  fiber: l.fiber ?? 0,
+                  sugar: l.sugar ?? 0,
+                  sodium: l.sodium ?? 0,
+                },
               },
-            },
-          }));
+            }));
           setMealLogs(logs);
         } catch {
           // 식단 로드 실패해도 로그인은 성공
@@ -378,16 +393,26 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   );
 
   // ============================================================
-  // [기능] 식단 기록 삭제 — DELETE /diet/log/:logId
+  // [기능] 식단 기록 삭제
+  // ─ 백엔드에 DELETE 엔드포인트가 없으므로 로컬 숨김으로 대응:
+  //   1) 낙관적 업데이트로 즉시 UI 제거
+  //   2) 삭제된 logId를 AsyncStorage에 저장 → 앱 재시작 후 로딩 시 필터링
   // ============================================================
   const removeMealLog = useCallback(async (logId: number) => {
-    // 낙관적 업데이트: 먼저 로컬에서 제거
+    // (1) 즉시 로컬 제거
     setMealLogs((prev) => prev.filter((l) => l.id !== logId));
+
+    // (2) 삭제 ID 영구 보관 (앱 재시작 후 백엔드에서 다시 내려와도 필터링)
     try {
-      await deleteMealLog(logId);
-    } catch {
-      // 서버 삭제 실패해도 로컬은 이미 제거됨 (UX 우선)
-    }
+      const raw = await AsyncStorage.getItem(STORAGE_KEY_DELETED_IDS);
+      const existingIds: number[] = raw ? JSON.parse(raw) : [];
+      if (!existingIds.includes(logId)) {
+        await AsyncStorage.setItem(
+          STORAGE_KEY_DELETED_IDS,
+          JSON.stringify([...existingIds, logId]),
+        );
+      }
+    } catch { /* AsyncStorage 오류 무시 */ }
   }, []);
 
   // ============================================================
@@ -504,6 +529,12 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => { AsyncStorage.setItem(STORAGE_KEY_SUPPLEMENTS,  JSON.stringify(supplements)); }, [supplements]);
   useEffect(() => { AsyncStorage.setItem(STORAGE_KEY_SUPP_LOGS,    JSON.stringify(supplementLogs)); }, [supplementLogs]);
   useEffect(() => { AsyncStorage.setItem(STORAGE_KEY_WATER_LOGS,   JSON.stringify(waterLogs)); }, [waterLogs]);
+  // 프로필·savedGoals 변경 시 AsyncStorage 자동 갱신 — updateProfile 후 재시작해도 값 유지
+  useEffect(() => {
+    if (currentUser) {
+      AsyncStorage.setItem(STORAGE_KEY_USER, JSON.stringify(currentUser)).catch(() => {});
+    }
+  }, [currentUser]);
 
   // ============================================================
   // [기능] 주간 칼로리 계산 (홈 화면 꺾은선 그래프용)
