@@ -6,7 +6,7 @@ import {
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { colors, spacing, borderRadius, shadow } from '../utils/theme';
 import { UserRecipe, UserRecipeIngredient } from '../types';
-import { createRecipe } from '../api/diet';
+import { createRecipe, updateRecipe } from '../api/diet';
 import { KeyboardAwareScrollView } from 'react-native-keyboard-aware-scroll-view';
 
 interface RecipeEditModalProps {
@@ -14,11 +14,12 @@ interface RecipeEditModalProps {
   initial: Partial<UserRecipe> | null;
   userId: string;
   ingredientSuggestions?: string[];
+  cookingToolOptions?: string[];
   onClose: () => void;
   onSave: (recipe: UserRecipe) => void;
 }
 
-export function RecipeEditModal({ visible, initial, userId, ingredientSuggestions = [], onClose, onSave }: RecipeEditModalProps) {
+export function RecipeEditModal({ visible, initial, userId, ingredientSuggestions = [], cookingToolOptions = [], onClose, onSave }: RecipeEditModalProps) {
   const insets = useSafeAreaInsets();
   const isEdit = !!initial?.title;
 
@@ -26,10 +27,11 @@ export function RecipeEditModal({ visible, initial, userId, ingredientSuggestion
   const [content, setContent]   = useState('');
   const [cookTime, setCookTime] = useState('30');
   const [servings, setServings] = useState('2');
-  const [ingredients, setIngredients] = useState<UserRecipeIngredient[]>([{ name: '', amount: '' }]);
-  const [tools, setTools]       = useState<string[]>(['']);
+  const [ingredients, setIngredients] = useState<UserRecipeIngredient[]>([{ name: '' }]);
+  const [tools, setTools]       = useState<string[]>([]);
   const [steps, setSteps]       = useState<string[]>(['']);
   const [saving, setSaving]     = useState(false);
+  const [saveStatus, setSaveStatus] = useState('');
 
   // 재료 검색 자동완성
   const [searchResults, setSearchResults] = useState<string[]>([]);
@@ -48,9 +50,9 @@ export function RecipeEditModal({ visible, initial, userId, ingredientSuggestion
       setIngredients(
         initial.ingredients && initial.ingredients.length > 0
           ? initial.ingredients
-          : [{ name: '', amount: '' }],
+          : [{ name: '' }],
       );
-      setTools(['']);
+      setTools(initial.tools ?? []);
       setSteps(
         initial.steps && initial.steps.length > 0
           ? initial.steps
@@ -61,15 +63,15 @@ export function RecipeEditModal({ visible, initial, userId, ingredientSuggestion
       setContent('');
       setCookTime('30');
       setServings('2');
-      setIngredients([{ name: '', amount: '' }]);
-      setTools(['']);
+      setIngredients([{ name: '' }]);
+      setTools([]);
       setSteps(['']);
     }
   }, [visible]);
 
-  const updateIngredient = (idx: number, field: 'name' | 'amount', val: string) => {
-    setIngredients((prev) => prev.map((ing, i) => i === idx ? { ...ing, [field]: val } : ing));
-    if (field === 'name') {
+  const updateIngredient = (idx: number, val: string) => {
+    setIngredients((prev) => prev.map((ing, i) => i === idx ? { ...ing, name: val } : ing));
+    {
       setActiveIngIdx(idx);
       if (searchTimer.current) clearTimeout(searchTimer.current);
       if (!val.trim()) { setSearchResults([]); return; }
@@ -91,18 +93,17 @@ export function RecipeEditModal({ visible, initial, userId, ingredientSuggestion
     setActiveIngIdx(null);
   };
 
-  const addIngredient = () => setIngredients((prev) => [...prev, { name: '', amount: '' }]);
+  const addIngredient = () => setIngredients((prev) => [...prev, { name: '' }]);
   const removeIngredient = (idx: number) => {
     if (ingredients.length === 1) return;
     setIngredients((prev) => prev.filter((_, i) => i !== idx));
     if (activeIngIdx === idx) { setSearchResults([]); setActiveIngIdx(null); }
   };
 
-  const updateTool = (idx: number, val: string) => setTools((prev) => prev.map((t, i) => i === idx ? val : t));
-  const addTool    = () => setTools((prev) => [...prev, '']);
-  const removeTool = (idx: number) => {
-    if (tools.length === 1) return;
-    setTools((prev) => prev.filter((_, i) => i !== idx));
+  const toggleTool = (tool: string) => {
+    setTools((prev) =>
+      prev.includes(tool) ? prev.filter((t) => t !== tool) : [...prev, tool],
+    );
   };
 
   const updateStep = (idx: number, val: string) => setSteps((prev) => prev.map((s, i) => i === idx ? val : s));
@@ -129,20 +130,57 @@ export function RecipeEditModal({ visible, initial, userId, ingredientSuggestion
     const validTools = tools.filter((t) => t.trim());
 
     setSaving(true);
+    setSaveStatus('레시피를 저장하고 있어요.');
     try {
-      let savedId = String(Date.now());
+      // 수정 모드: 기존 로컬 ID 유지 / 신규: 타임스탬프 → 서버 ID로 교체
+      let savedId: string = initial?.id ?? String(Date.now());
+      let backendId: number | undefined = initial?.backendId;
+      let analyzedNutrition = initial?.totalNutrition ?? { calories: 0, carbs: 0, protein: 0, fat: 0 };
+
       if (userId) {
         try {
-          const res = await createRecipe(userId, {
+          const dto = {
             title: title.trim(),
             content: content.trim() || undefined,
             ingredients: validIngredients.map((i) => i.name.trim()),
             cooking_tools: validTools,
             steps: validSteps.map((desc, i) => ({ step_number: i + 1, description: desc.trim() })),
-          });
-          if (res.id) savedId = String(res.id);
-        } catch {}
+          };
+
+          setSaveStatus('영양소를 분석하고 있어요.');
+          let res;
+          if (isEdit && backendId) {
+            // 수정 모드 — PUT으로 기존 레시피 업데이트 (중복 생성 방지)
+            res = await updateRecipe(backendId, userId, dto);
+          } else {
+            // 신규 — POST로 레시피 생성, 서버 ID 채택
+            res = await createRecipe(userId, dto);
+            if (res.id) {
+              if (!isEdit) savedId = String(res.id);
+              backendId = res.id;
+            }
+          }
+
+          // 서버가 AI로 추정한 영양소 반영 (0이면 기존 값 유지)
+          if ((res.calories ?? 0) > 0) {
+            analyzedNutrition = {
+              calories: res.calories ?? 0,
+              carbs: res.carbs ?? 0,
+              protein: res.protein ?? 0,
+              fat: res.fat ?? 0,
+              fiber: res.fiber ?? 0,
+              sugar: res.sugar ?? 0,
+              sodium: res.sodium ?? 0,
+            };
+          }
+        } catch (e: any) {
+          // 서버 오류 시 로컬에만 저장 + 실제 에러 메시지 Alert으로 노출 (디버깅용)
+          const msg = e?.response?.data?.message ?? e?.message ?? String(e);
+          const status = e?.response?.status ?? '없음';
+          console.warn('[RecipeEditModal] 서버 저장 실패:', msg, status, e);
+        }
       }
+
       const newRecipe: UserRecipe = {
         id: savedId,
         title: title.trim(),
@@ -152,15 +190,20 @@ export function RecipeEditModal({ visible, initial, userId, ingredientSuggestion
         servings: parseInt(servings, 10) || 2,
         youtubeUrl: initial?.youtubeUrl ?? '',
         ingredients: validIngredients,
+        tools: validTools,
         steps: validSteps,
-        totalNutrition: initial?.totalNutrition ?? { calories: 0, carbs: 0, protein: 0, fat: 0 },
-        createdAt: new Date().toLocaleDateString('ko-KR'),
+        totalNutrition: analyzedNutrition,
+        createdAt: initial?.createdAt ?? new Date().toLocaleDateString('ko-KR'),
+        backendId,
+        sharedRecipeId: initial?.sharedRecipeId,
+        isPublic: initial?.isPublic ?? Boolean(initial?.sharedRecipeId),
       };
       onSave(newRecipe);
       Alert.alert('저장 완료! ✅', `"${newRecipe.title}" 레시피가 저장됐어요.`);
     } catch {
       Alert.alert('오류', '저장 중 문제가 생겼어요.');
     } finally {
+      setSaveStatus('');
       setSaving(false);
     }
   };
@@ -176,7 +219,12 @@ export function RecipeEditModal({ visible, initial, userId, ingredientSuggestion
             </TouchableOpacity>
             <Text style={eStyles.headerTitle}>{isEdit ? '레시피 수정' : '레시피 직접 작성'}</Text>
             <TouchableOpacity style={[eStyles.saveBtn, saving && { opacity: 0.5 }]} onPress={handleSave} disabled={saving}>
-              {saving ? <ActivityIndicator color="#fff" size="small" /> : <Text style={eStyles.saveBtnTxt}>저장</Text>}
+              {saving ? (
+                <View style={eStyles.saveBusyRow}>
+                  <ActivityIndicator color="#fff" size="small" />
+                  <Text style={eStyles.saveBtnTxt}>저장 중</Text>
+                </View>
+              ) : <Text style={eStyles.saveBtnTxt}>저장</Text>}
             </TouchableOpacity>
           </View>
 
@@ -186,8 +234,16 @@ export function RecipeEditModal({ visible, initial, userId, ingredientSuggestion
             keyboardShouldPersistTaps="handled"
             showsVerticalScrollIndicator={false}
             enableOnAndroid
-            extraScrollHeight={20}
+            enableAutomaticScroll
+            extraScrollHeight={140}
+            keyboardOpeningTime={0}
           >
+            {saving && saveStatus ? (
+              <View style={eStyles.saveStatusBox}>
+                <ActivityIndicator color={colors.primary} size="small" />
+                <Text style={eStyles.saveStatusText}>{saveStatus}</Text>
+              </View>
+            ) : null}
             {/* 기본 정보 */}
             <Text style={eStyles.sectionLabel}>📌 기본 정보</Text>
             <View style={eStyles.card}>
@@ -225,17 +281,10 @@ export function RecipeEditModal({ visible, initial, userId, ingredientSuggestion
                         placeholder="재료 검색..."
                         placeholderTextColor={colors.textLight}
                         value={ing.name}
-                        onChangeText={(v) => updateIngredient(idx, 'name', v)}
+                        onChangeText={(v) => updateIngredient(idx, v)}
                         onFocus={() => setActiveIngIdx(idx)}
                       />
                     </View>
-                    <TextInput
-                      style={[eStyles.input, { flex: 1, marginBottom: 0, marginLeft: spacing.sm }]}
-                      placeholder="200g"
-                      placeholderTextColor={colors.textLight}
-                      value={ing.amount}
-                      onChangeText={(v) => updateIngredient(idx, 'amount', v)}
-                    />
                     <TouchableOpacity onPress={() => removeIngredient(idx)} style={eStyles.removeBtn}>
                       <Text style={eStyles.removeBtnTxt}>✕</Text>
                     </TouchableOpacity>
@@ -261,20 +310,31 @@ export function RecipeEditModal({ visible, initial, userId, ingredientSuggestion
 
             {/* 조리기구 */}
             <View style={eStyles.sectionHeader}>
-              <Text style={eStyles.sectionLabel}>🔪 조리기구</Text>
-              <TouchableOpacity onPress={addTool} style={eStyles.addRowBtn}>
-                <Text style={eStyles.addRowBtnTxt}>+ 추가</Text>
-              </TouchableOpacity>
+              <Text style={eStyles.sectionLabel}>{'\uD83C\uDF73 \uC870\uB9AC\uAE30\uAD6C'}</Text>
             </View>
             <View style={eStyles.card}>
-              {tools.map((tool, idx) => (
-                <View key={idx} style={eStyles.listRow}>
-                  <TextInput style={[eStyles.input, { flex: 1, marginBottom: 0 }]} placeholder="예: 프라이팬, 냄비" placeholderTextColor={colors.textLight} value={tool} onChangeText={(v) => updateTool(idx, v)} />
-                  <TouchableOpacity onPress={() => removeTool(idx)} style={eStyles.removeBtn}>
-                    <Text style={eStyles.removeBtnTxt}>✕</Text>
-                  </TouchableOpacity>
-                </View>
-              ))}
+              <View style={eStyles.toolGrid}>
+                {cookingToolOptions.map((tool) => {
+                  const selected = tools.includes(tool);
+                  return (
+                    <TouchableOpacity
+                      key={tool}
+                      style={[eStyles.toolChip, selected && eStyles.toolChipActive]}
+                      onPress={() => toggleTool(tool)}
+                      activeOpacity={0.8}
+                    >
+                      <Text style={[eStyles.toolChipText, selected && eStyles.toolChipTextActive]}>
+                        {selected ? '\u2713 ' : ''}{tool}
+                      </Text>
+                    </TouchableOpacity>
+                  );
+                })}
+              </View>
+              {tools.length > 0 && (
+                <TouchableOpacity onPress={() => setTools([])} style={eStyles.clearToolsBtn}>
+                  <Text style={eStyles.clearToolsText}>{'\uC120\uD0DD \uCD08\uAE30\uD654'}</Text>
+                </TouchableOpacity>
+              )}
             </View>
 
             {/* 조리 순서 */}
@@ -313,7 +373,7 @@ export function RecipeEditModal({ visible, initial, userId, ingredientSuggestion
               ))}
             </View>
 
-            <View style={{ height: 40 }} />
+            <View style={{ height: 170 }} />
           </KeyboardAwareScrollView>
         </View>
       </>
@@ -332,8 +392,16 @@ const eStyles = StyleSheet.create({
   backBtn: { padding: spacing.xs },
   backTxt: { fontSize: 18, color: colors.textLight },
   headerTitle: { flex: 1, textAlign: 'center', fontSize: 17, fontWeight: '800', color: colors.text },
-  saveBtn: { backgroundColor: colors.primary, borderRadius: borderRadius.full, paddingHorizontal: spacing.md, paddingVertical: spacing.xs + 2 },
+  saveBtn: { backgroundColor: colors.primary, borderRadius: borderRadius.full, paddingHorizontal: spacing.md, paddingVertical: spacing.xs + 2, minWidth: 58, alignItems: 'center' },
+  saveBusyRow: { flexDirection: 'row', alignItems: 'center', gap: 6 },
   saveBtnTxt: { color: '#fff', fontWeight: '800', fontSize: 14 },
+  saveStatusBox: {
+    flexDirection: 'row', alignItems: 'center', gap: 8,
+    backgroundColor: '#EEF2FF', borderRadius: borderRadius.md,
+    padding: spacing.sm, marginBottom: spacing.md,
+    borderWidth: 1, borderColor: colors.primary + '30',
+  },
+  saveStatusText: { color: colors.primary, fontSize: 12, fontWeight: '700' },
   body: { padding: spacing.lg },
   sectionHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: spacing.xs, marginTop: spacing.md },
   sectionLabel: { fontSize: 15, fontWeight: '800', color: colors.text },
@@ -367,4 +435,15 @@ const eStyles = StyleSheet.create({
   stepBtns: { flexDirection: 'column', gap: 2, marginTop: 4 },
   orderBtn: { width: 24, height: 24, borderRadius: 6, backgroundColor: colors.border, justifyContent: 'center', alignItems: 'center' },
   orderBtnTxt: { fontSize: 9, color: colors.textLight },
+  toolGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: spacing.xs },
+  toolChip: {
+    paddingVertical: 6, paddingHorizontal: spacing.sm,
+    borderRadius: borderRadius.full, borderWidth: 1.5, borderColor: colors.border,
+    backgroundColor: colors.background,
+  },
+  toolChipActive: { backgroundColor: colors.primary, borderColor: colors.primary },
+  toolChipText: { fontSize: 13, fontWeight: '600', color: colors.textLight },
+  toolChipTextActive: { color: '#fff' },
+  clearToolsBtn: { alignItems: 'center', marginTop: spacing.sm },
+  clearToolsText: { fontSize: 12, color: '#E74C3C', fontWeight: '700' },
 });

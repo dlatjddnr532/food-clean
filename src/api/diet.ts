@@ -195,6 +195,52 @@ export const deleteRecipe = async (recipeId: number, userId: string): Promise<vo
 };
 
 // ============================================================
+// [기능] 레시피 공개/비공개 토글
+// [엔드포인트] PATCH /recipes/:id/public/:userId
+// ============================================================
+export const toggleRecipePublic = async (recipeId: number, userId: string): Promise<BackendRecipe> => {
+  const response = await api.patch<BackendRecipe>(`/recipes/${recipeId}/public/${userId}`);
+  return response.data;
+};
+
+// ============================================================
+// [기능] 레시피 수정
+// [엔드포인트] PUT /recipes/:id/:userId
+// ============================================================
+export const updateRecipe = async (
+  recipeId: number,
+  userId: string,
+  dto: {
+    title: string;
+    content?: string;
+    ingredients: string[];
+    cooking_tools: string[];
+    steps: { step_number: number; description: string }[];
+  },
+): Promise<BackendRecipe> => {
+  const response = await api.put<BackendRecipe>(`/recipes/${recipeId}/${userId}`, dto);
+  return response.data;
+};
+
+// ============================================================
+// [기능] 내가 작성한 레시피 목록 조회
+// [엔드포인트] GET /recipes/my/list/:userId
+// ============================================================
+export const getMyRecipes = async (userId: string): Promise<BackendRecipe[]> => {
+  const response = await api.get<BackendRecipe[]>(`/recipes/my/list/${userId}`);
+  return response.data;
+};
+
+// ============================================================
+// [기능] 내가 좋아요한 레시피 목록 조회
+// [엔드포인트] GET /recipes/my/liked/:userId
+// ============================================================
+export const getMyLikedRecipes = async (userId: string): Promise<BackendRecipe[]> => {
+  const response = await api.get<BackendRecipe[]>(`/recipes/my/liked/${userId}`);
+  return response.data;
+};
+
+// ============================================================
 // [기능] 레시피 좋아요 / 취소 토글
 // [화면] RecipeScreen — 하트 버튼 누를 때 호출됨
 // [엔드포인트] POST /recipes/:id/like/:userId

@@ -6,7 +6,7 @@ import {
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { colors, spacing, borderRadius, shadow } from '../utils/theme';
 import { useApp } from '../context/AppContext';
-import { getRecipes, getRecipeById, BackendRecipe, getTop3Recipes, analyzeYoutubeRecipe, createRecipe, toggleRecipeLike, deleteRecipe } from '../api/diet';
+import { getRecipes, getRecipeById, BackendRecipe, getTop3Recipes, analyzeYoutubeRecipe, createRecipe, toggleRecipeLike, toggleRecipePublic, deleteRecipe, updateRecipe, getMyRecipes, getMyLikedRecipes, saveMealLog } from '../api/diet';
 import { Food, Recipe, MealType, NutritionInfo, UserRecipe } from '../types';
 import { CookingModeModal } from './CookingModeModal';
 import { RecipeEditModal } from './RecipeEditModal';
@@ -17,6 +17,47 @@ const TAB_ICONS = ['❤️', '📋', '🥬', '📹'];
 const MEAL_TYPES: MealType[] = ['아침', '점심', '저녁', '간식'];
 
 // ── 영양소 미니 배지 ──
+
+function extractYoutubeVideoId(rawUrl: string): string | null {
+  const input = rawUrl.trim();
+  if (!input) return null;
+
+  if (/^[a-zA-Z0-9_-]{11}$/.test(input)) {
+    return input;
+  }
+
+  try {
+    const url = new URL(input.startsWith('http') ? input : `https://${input}`);
+    const host = url.hostname.replace(/^www\./, '').replace(/^m\./, '');
+
+    if (host === 'youtu.be') {
+      const id = url.pathname.split('/').filter(Boolean)[0];
+      return id && /^[a-zA-Z0-9_-]{11}$/.test(id) ? id : null;
+    }
+
+    if (host === 'youtube.com' || host === 'youtube-nocookie.com') {
+      const watchId = url.searchParams.get('v');
+      if (watchId && /^[a-zA-Z0-9_-]{11}$/.test(watchId)) {
+        return watchId;
+      }
+
+      const parts = url.pathname.split('/').filter(Boolean);
+      const videoPathIndex = parts.findIndex((part) => ['shorts', 'embed', 'live'].includes(part));
+      const pathId = videoPathIndex >= 0 ? parts[videoPathIndex + 1] : undefined;
+      return pathId && /^[a-zA-Z0-9_-]{11}$/.test(pathId) ? pathId : null;
+    }
+  } catch {
+    return null;
+  }
+
+  return null;
+}
+
+function toCanonicalYoutubeUrl(rawUrl: string): string | null {
+  const videoId = extractYoutubeVideoId(rawUrl);
+  return videoId ? `https://www.youtube.com/watch?v=${videoId}` : null;
+}
+
 interface NutriBadgeProps {
   label: string;
   value: number | undefined;
@@ -309,13 +350,15 @@ const modal = StyleSheet.create({
 
 export default function RecipeScreen() {
   const insets = useSafeAreaInsets();
-  const { addMealLog, favoriteIds, toggleFavorite, isFavorite, userRecipes, addUserRecipe, removeUserRecipe, updateUserRecipe, currentUser } = useApp();
+  const { addMealLog, favoriteIds, toggleFavorite, isFavorite, userRecipes, addUserRecipe, removeUserRecipe, updateUserRecipe, currentUser, deletedRecipeServerIds, addDeletedRecipeServerId } = useApp();
   const [activeTab, setActiveTab] = useState<0 | 1 | 2 | 3>(1);
 
   const [youtubeUrl, setYoutubeUrl] = useState('');
   const [editModalVisible, setEditModalVisible] = useState(false);
   const [editInitial, setEditInitial] = useState<Partial<UserRecipe> | null>(null);
   const [analyzing, setAnalyzing] = useState(false);
+  const [analysisStatusText, setAnalysisStatusText] = useState('');
+  const [youtubeAnalysisError, setYoutubeAnalysisError] = useState<string | null>(null);
   const [analyzedRecipe, setAnalyzedRecipe] = useState<UserRecipe | null>(null);
   const [searchText, setSearchText] = useState('');
   const [availableTools, setAvailableTools] = useState<string[]>([]); // 사용 가능한 조리기구 목록
@@ -324,6 +367,12 @@ export default function RecipeScreen() {
   const [expandedUserRecipeId, setExpandedUserRecipeId] = useState<string | null>(null);
   const [modalItem, setModalItem] = useState<ModalItem | null>(null);
   const [selectedIngredients, setSelectedIngredients] = useState<string[]>([]);
+  const [tab2AvailTools, setTab2AvailTools] = useState<string[]>([]);
+  const [tab2ToolFilterVisible, setTab2ToolFilterVisible] = useState(false);
+  const [fetchingStepId, setFetchingStepId] = useState<number | null>(null);
+  const [recipeActionId, setRecipeActionId] = useState<string | null>(null);
+  // steps를 이미 가져온 레시피 ID 캐시 (재펼침 시 재요청 방지)
+  const fetchedStepIds = useRef<Set<number>>(new Set());
   const recipeListRef = useRef<FlatList>(null);
   // 탭 전환 후 FlatList 마운트 시 스크롤할 인덱스 보관 (ref이므로 리렌더 없음)
   const pendingScrollIndexRef = useRef<number | null>(null);
@@ -333,6 +382,11 @@ export default function RecipeScreen() {
   // 서버 기준 인기 레시피 — GET /recipes/top3 결과
   // 로드 실패 시 top3Display(프론트 계산)로 자동 폴백
   const [top3Recipes, setTop3Recipes] = useState<Recipe[]>([]);
+  // 서버 기준 좋아요한 레시피 — GET /recipes/my/liked/:userId
+  const [serverLikedRecipes, setServerLikedRecipes] = useState<Recipe[]>([]);
+  const [pendingLikeIds, setPendingLikeIds] = useState<Set<number>>(() => new Set());
+  const pendingLikeIdsRef = useRef<Set<number>>(new Set());
+  const top3RefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const excludeTools = useMemo(
     () => availableTools.length > 0
       ? COOKING_TOOLS.filter((tool) => !availableTools.includes(tool))
@@ -389,11 +443,62 @@ export default function RecipeScreen() {
       .then((data) => setAllRecipes(data.map(backendToRecipe)))
       .catch(() => setAllRecipes([]))
       .finally(() => setRecipesLoading(false));
-    // 서버 기준 top3 별도 로드 (전체 목록과 독립적으로 최신 인기순 반영)
+    // 서버 기준 top3 별도 로드
     getTop3Recipes()
       .then((data) => { if (data.length > 0) setTop3Recipes(data.map(backendToRecipe)); })
       .catch(() => { /* 실패 시 top3Display 폴백 */ });
   }, [excludeTools]);
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // 서버 동기화: 로그인 사용자의 좋아요 레시피 + 나만의 레시피 목록을 서버에서 가져와 로컬과 병합
+  // - getMyLikedRecipes: 서버 기준 좋아요 목록 → serverLikedRecipes 상태에 저장
+  //   (즐겨찾기 탭에서 로컬 favoriteIds와 합쳐 표시)
+  // - getMyRecipes: 서버에 저장된 내 레시피 중 로컬에 없는 것(backendId/sharedRecipeId 미매칭)
+  //   → addUserRecipe로 자동 복원 (앱 재설치 후에도 내 레시피 유지)
+  // ─────────────────────────────────────────────────────────────────────────
+  useEffect(() => {
+    if (!currentUser) return;
+    const userId = String(currentUser.id);
+
+    // 좋아요한 레시피 서버 동기화
+    getMyLikedRecipes(userId)
+      .then((data) => setServerLikedRecipes(data.map(backendToRecipe)))
+      .catch(() => { /* 실패 시 로컬 favoriteIds만 사용 */ });
+
+    // 내가 작성한 레시피 서버 동기화 — 로컬에 없는 것만 복원
+    getMyRecipes(userId)
+      .then((data) => {
+        data.forEach((serverRecipe) => {
+          // 이미 로컬에 sharedRecipeId 또는 backendId로 연결된 레시피는 건너뜀
+          const alreadyLinked = userRecipes.some(
+            (ur) => ur.sharedRecipeId === serverRecipe.id || ur.backendId === serverRecipe.id,
+          );
+          // 사용자가 직접 삭제한 레시피는 서버에 남아 있어도 재복원하지 않음
+          const wasDeleted = deletedRecipeServerIds.includes(serverRecipe.id);
+          if (!alreadyLinked && !wasDeleted) {
+            const restored = backendToRecipe(serverRecipe);
+            addUserRecipe({
+              id: `server-${serverRecipe.id}`,
+              title: restored.title,
+              emoji: restored.emoji,
+              category: restored.category,
+              cookTime: restored.cookTime,
+              servings: 2,
+              ingredients: restored.ingredients,
+              steps: restored.steps,
+              tools: restored.tools,
+              totalNutrition: restored.totalNutrition,
+              youtubeUrl: serverRecipe.video_url ?? '',
+              createdAt: serverRecipe.created_at,
+              sharedRecipeId: serverRecipe.is_public ? serverRecipe.id : undefined,
+              isPublic: serverRecipe.is_public === true,
+              backendId: serverRecipe.id,
+            });
+          }
+        });
+      })
+      .catch(() => { /* 실패 시 로컬 userRecipes만 사용 */ });
+  }, [currentUser?.id, deletedRecipeServerIds]);
 
   // ─────────────────────────────────────────────────────────────────────
   // top3Display: 프론트 계산 폴백 — getTop3Recipes() 실패 시 사용
@@ -439,6 +544,13 @@ export default function RecipeScreen() {
   };
 
   // 백엔드에 올라간 레시피는 본인 것 포함 모두 표시
+  useEffect(() => {
+    if (activeTab !== 2) {
+      setTab2AvailTools([]);
+      setTab2ToolFilterVisible(false);
+    }
+  }, [activeTab]);
+
   const communityRecipes = useMemo(
     () => allRecipes,
     [allRecipes],
@@ -463,10 +575,40 @@ export default function RecipeScreen() {
     });
   }, [searchText, communityRecipes, availableTools]);
 
-  const favoriteRecipes = useMemo(
-    () => communityRecipes.filter((r) => isFavorite(r.id)),
-    [favoriteIds, communityRecipes],
-  );
+  const favoriteIdSet = useMemo(() => new Set(favoriteIds), [favoriteIds]);
+
+  const favoriteRecipes = useMemo(() => {
+    // 로컬 favoriteIds 기반 + 서버 liked 목록 병합 (중복 제거)
+    const localFavs = communityRecipes.filter((r) => favoriteIdSet.has(r.id));
+    const serverIds = new Set(localFavs.map((r) => r.id));
+    const serverOnly = serverLikedRecipes.filter((r) => !serverIds.has(r.id));
+    return [...localFavs, ...serverOnly];
+  }, [favoriteIdSet, communityRecipes, serverLikedRecipes]);
+
+  const setLikePending = (id: number, pending: boolean) => {
+    const next = new Set(pendingLikeIdsRef.current);
+    if (pending) next.add(id);
+    else next.delete(id);
+    pendingLikeIdsRef.current = next;
+    setPendingLikeIds(next);
+  };
+
+  const updateRecipeLikeCount = (id: number, updater: (likes: number) => number) => {
+    const applyLikeUpdate = (r: Recipe) => (
+      r.id === id ? { ...r, likes: Math.max(0, updater(r.likes)) } : r
+    );
+    setAllRecipes((prev) => prev.map(applyLikeUpdate));
+    setTop3Recipes((prev) => prev.map(applyLikeUpdate));
+  };
+
+  const refreshTop3Soon = () => {
+    if (top3RefreshTimerRef.current) clearTimeout(top3RefreshTimerRef.current);
+    top3RefreshTimerRef.current = setTimeout(() => {
+      getTop3Recipes()
+        .then((data) => { if (data.length > 0) setTop3Recipes(data.map(backendToRecipe)); })
+        .catch(() => {});
+    }, 700);
+  };
 
   // 인기 레시피 카드 탭 → filteredRecipes에서 해당 아이템으로 스크롤
   const handleTop3Press = useCallback((recipeId: number) => {
@@ -498,15 +640,16 @@ export default function RecipeScreen() {
           (ing) => ri.name.includes(ing) || ing.includes(ri.name),
         ),
       ).length;
-      // 재료 2~3개: ceil(n/2) — 절반 이상
-    // 재료 4개 이상: floor(n/2)+1 — 반 초과 (4개→3개, 6개→4개)
-    const len = recipe.ingredients.length;
-    const threshold = len <= 3
-      ? Math.ceil(len / 2)
-      : Math.floor(len / 2) + 1;
-    return matchCount >= threshold;
+      const len = recipe.ingredients.length;
+      const threshold = len <= 3
+        ? Math.ceil(len / 2)
+        : Math.floor(len / 2) + 1;
+      if (matchCount < threshold) return false;
+
+      if (tab2AvailTools.length === 0) return true;
+      return recipe.tools.some((tool) => tab2AvailTools.includes(tool));
     });
-  }, [selectedIngredients, allRecipes]);
+  }, [selectedIngredients, allRecipes, tab2AvailTools]);
 
   const toggleIngredient = (name: string): void => {
     setSelectedIngredients((prev) =>
@@ -545,62 +688,99 @@ export default function RecipeScreen() {
   // 5) API 실패 → toggleFavorite 재호출로 낙관적 업데이트 롤백
   // ─────────────────────────────────────────────────────────────────────────
   const toggleLike = async (id: number): Promise<void> => {
-    // 로그인 안 된 경우 — 하트 건드리지 않고 조용히 종료
-    if (!currentUser) return;
+    if (!currentUser || pendingLikeIdsRef.current.has(id)) return;
 
-    const wasLiked = isFavorite(id); // 동기적으로 현재 상태 캡처
-    toggleFavorite(id);              // 낙관적 업데이트 — 하트 즉시 반영
+    const wasLiked = favoriteIdSet.has(id);
+    const optimisticLiked = !wasLiked;
+    const optimisticDelta = optimisticLiked ? 1 : -1;
+
+    setLikePending(id, true);
+    toggleFavorite(id);
+    updateRecipeLikeCount(id, (likes) => likes + optimisticDelta);
 
     try {
       const res = await toggleRecipeLike(id, currentUser.id);
 
-      // res.liked === wasLiked 이면 서버가 기대와 반대로 토글한 것
-      // (예: 이미 좋아요 상태였는데 로컬엔 없었던 경우 → 서버는 unlike 처리)
-      // → 낙관적 업데이트를 되돌려 서버 상태와 맞춤
-      if (res.liked === wasLiked) {
+      if (res.liked !== optimisticLiked) {
         toggleFavorite(id);
       }
 
-      // 서버 likes_count 로 카드 숫자 동기화
-      setAllRecipes((prev) =>
-        prev.map((r) => (r.id === id ? { ...r, likes: res.likes_count } : r)),
-      );
-
-      // 좋아요 변경 후 서버 기준 top3 재조회 (순위가 바뀔 수 있으므로)
-      getTop3Recipes()
-        .then((data) => { if (data.length > 0) setTop3Recipes(data.map(backendToRecipe)); })
-        .catch(() => {});
-
+      updateRecipeLikeCount(id, () => res.likes_count);
+      refreshTop3Soon();
     } catch {
-      // API 실패 → 낙관적 업데이트 롤백
       toggleFavorite(id);
+      updateRecipeLikeCount(id, (likes) => likes - optimisticDelta);
+      Alert.alert('좋아요 반영 실패', '네트워크 상태를 확인한 뒤 다시 눌러주세요.');
+    } finally {
+      setLikePending(id, false);
     }
   };
 
-  const handleAdd = (mealType: MealType, item: ModalItem, customNutrition: NutritionInfo): void => {
+  const handleAdd = async (mealType: MealType, item: ModalItem, customNutrition: NutritionInfo): Promise<void> => {
     let food: Food;
     if ('title' in item) {
       food = {
         id: item.id, name: item.title, emoji: item.emoji,
-        nutrition: customNutrition, per: '1인분', category: item.category,
+        nutrition: customNutrition, per: '1??', category: item.category,
       };
     } else {
       food = { ...item, nutrition: customNutrition };
     }
+
     addMealLog(mealType, food);
-    Alert.alert('추가 완료! ✅', `${mealType}에 "${food.name}"이(가) 추가됐어요!`);
+    Alert.alert('추가 완료!', `${mealType}에 "${food.name}"이(가) 추가되었어요.`);
+
+    if (currentUser) {
+      const today = new Date().toISOString().split('T')[0];
+      saveMealLog(String(currentUser.id), {
+        mealType,
+        foodName: food.name,
+        quantity: 100,
+        calories: customNutrition.calories ?? 0,
+        carbs: customNutrition.carbs ?? 0,
+        protein: customNutrition.protein ?? 0,
+        fat: customNutrition.fat ?? 0,
+        fiber: customNutrition.fiber,
+        sugar: customNutrition.sugar,
+        sodium: customNutrition.sodium,
+        eatDate: today,
+      }).catch(() => {
+        Alert.alert('서버 저장 실패', '앱에는 추가됐지만 서버 식단 기록 저장에 실패했어요. 네트워크 상태를 확인해주세요.');
+      });
+    }
   };
 
   // ── 레시피 카드 ──
   const RecipeCard = ({ item }: { item: Recipe }) => {
     const isExpanded = expandedId === item.id;
+    const itemLiked = favoriteIdSet.has(item.id);
+    const itemLikePending = pendingLikeIds.has(item.id);
     const n = item.totalNutrition;
     const hasNutrition = n.calories > 0;
     return (
       <View style={styles.card}>
         <TouchableOpacity
           style={styles.cardHeader}
-          onPress={() => setExpandedId(isExpanded ? null : item.id)}
+          onPress={() => {
+            const nextExpanded = isExpanded ? null : item.id;
+            setExpandedId(nextExpanded);
+            // 처음 펼칠 때, 아직 steps를 안 가져왔으면 getRecipeById로 조회
+            if (nextExpanded !== null && !fetchedStepIds.current.has(item.id) && item.steps.length === 0) {
+              setFetchingStepId(item.id);
+              getRecipeById(item.id)
+                .then((full) => {
+                  const steps = (full.steps ?? [])
+                    .sort((a, b) => a.step_number - b.step_number)
+                    .map((s) => s.description);
+                  setAllRecipes((prev) =>
+                    prev.map((r) => r.id === item.id ? { ...r, steps } : r),
+                  );
+                  fetchedStepIds.current.add(item.id);
+                })
+                .catch(() => { /* steps 없으면 그냥 숨김 */ })
+                .finally(() => setFetchingStepId(null));
+            }
+          }}
           activeOpacity={0.8}
         >
           <Text style={styles.cardEmoji}>{item.emoji}</Text>
@@ -617,7 +797,16 @@ export default function RecipeScreen() {
                         onPress: async () => {
                           // 로컬 상태 먼저 제거 (백엔드 DELETE /recipes/:id/:userId 구현 후 API 연동 예정)
                           setAllRecipes((prev) => prev.filter((r) => r.id !== item.id));
-                          try { await deleteRecipe(item.id, String(currentUser!.id)); } catch {}
+                          setTop3Recipes((prev) => prev.filter((r) => r.id !== item.id));
+                          removeUserRecipe(String(item.id));
+                          addDeletedRecipeServerId(item.id);
+                          try {
+                            await deleteRecipe(item.id, String(currentUser!.id));
+                            refreshTop3Soon();
+                          } catch {
+                            Alert.alert('삭제 실패', '서버에서 레시피를 삭제하지 못했어요. 네트워크 상태를 확인해주세요.');
+                            refreshTop3Soon();
+                          }
                         },
                       },
                     ])}
@@ -628,14 +817,19 @@ export default function RecipeScreen() {
                 )}
                 <TouchableOpacity
                   onPress={() => toggleLike(item.id)}
+                  disabled={itemLikePending}
+                  activeOpacity={0.55}
                   hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-                  style={{ flexDirection: 'row', alignItems: 'center', gap: 3 }}
+                  style={{
+                    flexDirection: 'row', alignItems: 'center', gap: 3,
+                    opacity: itemLikePending ? 0.65 : 1,
+                  }}
                 >
-                  <Text style={{ fontSize: 16 }}>{isFavorite(item.id) ? '❤️' : '🤍'}</Text>
+                  <Text style={{ fontSize: 16 }}>{itemLiked ? '❤️' : '🤍'}</Text>
                   {item.likes > 0 && (
                     <Text style={{
                       fontSize: 12, fontWeight: '700',
-                      color: isFavorite(item.id) ? '#E74C3C' : colors.textLight,
+                      color: itemLiked ? '#E74C3C' : colors.textLight,
                     }}>
                       {item.likes}
                     </Text>
@@ -644,7 +838,7 @@ export default function RecipeScreen() {
               </View>
             </View>
             <Text style={styles.cardMeta}>⏱️ {item.cookTime}분 · {item.category}</Text>
-            {item.creatorName && (
+            {Boolean(item.creatorName) && (
               <Text style={styles.cardCreator}>👤 {item.creatorName}</Text>
             )}
             {hasNutrition ? (
@@ -668,7 +862,7 @@ export default function RecipeScreen() {
 
         {isExpanded && (
           <View style={styles.expandedArea}>
-            {item.tools && item.tools.length > 0 && (
+            {item.tools.length > 0 && (
               <View style={styles.expandSection}>
                 <Text style={styles.expandTitle}>🍳 조리도구</Text>
                 <View style={styles.toolsRow}>
@@ -688,14 +882,18 @@ export default function RecipeScreen() {
                   {item.ingredients.map((ing) => (
                     <View key={ing.name} style={styles.ingChip}>
                       <Text style={styles.ingChipText}>{ing.name}</Text>
-                      {ing.amount ? <Text style={styles.ingChipAmount}>{ing.amount}</Text> : null}
-                    </View>
+                      </View>
                   ))}
                 </View>
               </View>
             )}
 
-            {item.steps.length > 0 && (
+            {fetchingStepId === item.id ? (
+              <View style={[styles.expandSection, { alignItems: 'center', paddingVertical: 12 }]}>
+                <ActivityIndicator size="small" color={colors.primary} />
+                <Text style={{ fontSize: 12, color: colors.textLight, marginTop: 6 }}>조리 방법 불러오는 중...</Text>
+              </View>
+            ) : item.steps.length > 0 ? (
               <View style={styles.expandSection}>
                 <Text style={styles.expandTitle}>👨‍🍳 조리 방법</Text>
                 {item.steps.map((step, i) => (
@@ -705,7 +903,7 @@ export default function RecipeScreen() {
                   </View>
                 ))}
               </View>
-            )}
+            ) : null}
 
             <View style={styles.expandActions}>
               <TouchableOpacity
@@ -728,70 +926,47 @@ export default function RecipeScreen() {
   // 카드 본체 탭 = 선택(레시피 추천용) / + 버튼 = 식단에 추가
   const FoodIngredientCard = ({ name }: { name: string }) => {
     const isSelected = selectedIngredients.includes(name);
-    const asFood: Food = {
-      id: 0,
-      name,
-      emoji: '🍽️',
-      category: '음식',
-      per: '직접 입력',
-      nutrition: {
-        calories: 0,
-        carbs: 0,
-        protein: 0,
-        fat: 0,
-        fiber: 0,
-        sugar: 0,
-        sodium: 0,
-      },
-    };
     return (
       <TouchableOpacity
         style={[styles.fiCard, isSelected && styles.fiCardSelected]}
         onPress={() => toggleIngredient(name)}
         activeOpacity={0.85}
       >
-        {/* 선택 상태 왼쪽 바 */}
         <View style={[styles.fiSelectBar, isSelected && { backgroundColor: colors.primary }]} />
 
         <View style={styles.fiBody}>
           <View style={styles.fiNameRow}>
-            <Text style={styles.fiName} numberOfLines={1}>{name}</Text>
-            {isSelected && <Text style={styles.fiCheckBadge}>✓ 선택됨</Text>}
+            <Text style={styles.fiName} numberOfLines={1}>
+              {name}
+            </Text>
           </View>
-          <Text style={styles.fiNoNutri}>✏️ 추가 시 직접 입력</Text>
         </View>
-
-        {/* + 식단 추가 버튼 */}
-        <TouchableOpacity
-          style={styles.fiAddBtn}
-          onPress={() => setModalItem(asFood)}
-          hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-        >
-          <Text style={styles.fiAddBtnText}>+</Text>
-        </TouchableOpacity>
       </TouchableOpacity>
     );
   };
 
   // ── 유튜브 레시피 분석 ──
+  // -- YouTube recipe analysis --
   const handleAnalyzeYoutube = async () => {
     if (!youtubeUrl.trim()) {
-      Alert.alert('URL 입력', '유튜브 URL을 입력해주세요.');
-      return;
+      Alert.alert('잘못된 URL', '유튜브 영상 주소만 사용할 수 있어요.\n예: https://youtube.com/watch?v=...');
     }
     if (!currentUser) {
       Alert.alert('로그인 필요', '로그인 후 사용할 수 있어요.');
       return;
     }
-    const isYoutube = youtubeUrl.includes('youtube.com') || youtubeUrl.includes('youtu.be');
-    if (!isYoutube) {
-      Alert.alert('잘못된 URL', '유튜브 URL만 지원해요.\n예: https://youtube.com/watch?v=...');
+    const canonicalYoutubeUrl = toCanonicalYoutubeUrl(youtubeUrl);
+    if (!canonicalYoutubeUrl) {
+      Alert.alert('잘못된 URL', '유튜브 영상 주소만 사용할 수 있어요.\n예: https://youtube.com/watch?v=...');
       return;
     }
     setAnalyzing(true);
+    setAnalysisStatusText('영상 주소를 확인하고 있어요.');
+    setYoutubeAnalysisError(null);
     setAnalyzedRecipe(null);
     try {
-      const res = await analyzeYoutubeRecipe(String(currentUser.id), youtubeUrl.trim());
+      setAnalysisStatusText('자막을 읽고 레시피를 분석하고 있어요.');
+      const res = await analyzeYoutubeRecipe(String(currentUser.id), canonicalYoutubeUrl);
       if (res.success && res.title) {
         const newRecipe: UserRecipe = {
           id: res.id ? String(res.id) : String(Date.now()),
@@ -800,8 +975,8 @@ export default function RecipeScreen() {
           category: '나만의 요리',
           cookTime: 30,
           servings: 2,
-          youtubeUrl: res.video_url ?? youtubeUrl.trim(),
-          ingredients: (res.ingredients ?? []).map((i) => ({ name: i.name, amount: '' })),
+          youtubeUrl: res.video_url ?? canonicalYoutubeUrl,
+          ingredients: (res.ingredients ?? []).map((i) => ({ name: i.name })),
           steps: (res.steps ?? [])
             .sort((a, b) => a.step_number - b.step_number)
             .map((s) => s.description),
@@ -815,29 +990,31 @@ export default function RecipeScreen() {
             sodium: res.sodium ?? 0,
           },
           createdAt: new Date().toLocaleDateString('ko-KR'),
-          // backendId: DB에 저장된 ID (비공개 상태). 공개하기 버튼으로 is_public 전환 시 사용
           backendId: res.id,
+          isPublic: res.is_public === true,
+          sharedRecipeId: res.is_public ? res.id : undefined,
         };
+        setYoutubeAnalysisError(null);
         setAnalyzedRecipe(newRecipe);
       } else {
         const errMsg = res.message ?? '';
-        const detail = (errMsg && errMsg !== 'BACKEND_NOT_READY') ? `\n\n서버 응답: ${errMsg}` : '';
-        Alert.alert(
-          '분석 실패 😥',
-          '이 영상에서 레시피를 찾지 못했어요.\n\n' +
-          '✅ 잘 되는 영상:\n• 한국어 자막이 있는 요리 영상\n• 말로 설명하는 쿠킹 채널\n\n' +
-          '❌ 안 되는 영상:\n• 자막 없는 영상\n• 배경 음악만 있는 영상' +
-          detail,
-        );
+        const fallbackMessage = errMsg.includes('자막')
+          ? '이 영상은 자막을 가져올 수 없어요. 영상 설명란이나 댓글의 레시피를 직접 붙여넣어 저장할 수 있어요.'
+          : '이 영상에서 레시피를 찾지 못했어요. 한국어 자막이 있는 요리 영상이 가장 잘 분석돼요.';
+        setYoutubeAnalysisError(fallbackMessage);
       }
     } catch {
-      Alert.alert(
-        '연결 오류 😥',
-        '서버와 연결할 수 없어요.\n잠시 후 다시 시도해주세요.',
-      );
+      setYoutubeAnalysisError('서버와 연결할 수 없어요. 잠시 후 다시 시도하거나 직접 작성으로 저장해주세요.');
     } finally {
+      setAnalysisStatusText('');
       setAnalyzing(false);
     }
+  };
+
+  const handleYoutubeFallbackWrite = () => {
+    const canonicalYoutubeUrl = toCanonicalYoutubeUrl(youtubeUrl) ?? youtubeUrl.trim();
+    setEditInitial({ youtubeUrl: canonicalYoutubeUrl });
+    setEditModalVisible(true);
   };
 
   const handleSaveUserRecipe = () => {
@@ -869,12 +1046,11 @@ export default function RecipeScreen() {
   //   * 수정 PATCH API 없음 → 프론트 로컬만 반영 (백엔드 구현 대기)
   // ─────────────────────────────────────────────────────────────────────────
   const handleEditSave = (recipe: UserRecipe) => {
-    // 기존 레시피 수정인지 신규인지 구분
     const isExisting = userRecipes.some((r) => r.id === recipe.id);
     if (isExisting) {
       updateUserRecipe(recipe);
-      // 공유된 레시피라면 레시피 탭에도 즉시 반영
-      if (recipe.sharedRecipeId) {
+      if (recipe.isPublic && recipe.sharedRecipeId) {
+        // 로컬 즉시 반영
         setAllRecipes((prev) =>
           prev.map((r) =>
             r.id === recipe.sharedRecipeId
@@ -886,19 +1062,29 @@ export default function RecipeScreen() {
                   category: recipe.category,
                   ingredients: recipe.ingredients.map((i) => ({
                     name: i.name,
-                    amount: i.amount,
+                    amount: '',
                     nutrition: { calories: 0, carbs: 0, protein: 0, fat: 0 },
                   })),
+                  tools: recipe.tools ?? r.tools,
                   steps: recipe.steps,
                   totalNutrition: recipe.totalNutrition,
                   content: recipe.steps.join('\n'),
                 }
-              : r
-          )
+              : r,
+          ),
         );
+        // 백엔드 PUT /recipes/:id/:userId 동기화
+        if (currentUser) {
+          updateRecipe(recipe.backendId ?? recipe.sharedRecipeId, String(currentUser.id), {
+            title: recipe.title,
+            content: recipe.steps.join('\n'),
+            ingredients: recipe.ingredients.map((i) => i.name),
+            cooking_tools: recipe.tools ?? [],
+            steps: recipe.steps.map((s, idx) => ({ step_number: idx + 1, description: s })),
+          }).catch(() => { /* 로컬 반영은 이미 됐으므로 실패 무시 */ });
+        }
       }
     } else {
-      // 신규 레시피 → 로컬에만 저장 (공개는 사용자가 직접 "공개하기" 버튼으로)
       addUserRecipe(recipe);
     }
     setEditModalVisible(false);
@@ -906,62 +1092,103 @@ export default function RecipeScreen() {
     setYoutubeUrl('');
   };
 
-  // ─────────────────────────────────────────────────────────────────────────
-  // handlePublishUserRecipe: 나만의 레시피를 레시피 탭에 공개
-  // - POST /recipes/:userId 로 DB에 저장
-  // - 반환된 id를 sharedRecipeId로 저장 → 이후 수정/삭제 시 서버와 연결
-  // - allRecipes 앞에 추가 → 레시피 탭 즉시 반영
-  // ─────────────────────────────────────────────────────────────────────────
   const handlePublishUserRecipe = async (recipe: UserRecipe) => {
     if (!currentUser) return;
     Alert.alert(
-      '레시피 공개',
-      `"${recipe.title}"을 레시피 탭에 공개할까요?`,
+      '\uB808\uC2DC\uD53C \uACF5\uAC1C',
+      `"${recipe.title}"\uC744(\uB97C) \uB808\uC2DC\uD53C \uD0ED\uC5D0 \uACF5\uAC1C\uD560\uAE4C\uC694?`,
       [
-        { text: '취소', style: 'cancel' },
+        { text: '\uCDE8\uC18C', style: 'cancel' },
         {
-          text: '공개하기', style: 'default',
+          text: '\uACF5\uAC1C\uD558\uAE30', style: 'default',
           onPress: async () => {
-            const dto = {
-              title: recipe.title,
-              content: recipe.steps.join('\n'),
-              // 재료명 + 양을 함께 전송 → 백엔드 AI 영양소 추정 정확도 향상
-              ingredients: recipe.ingredients.map((i) => ({ name: i.name, amount: i.amount || '적당량' })),
-              cooking_tools: [] as string[],
-              steps: recipe.steps.map((s, idx) => ({ step_number: idx + 1, description: s })),
-            };
+            setRecipeActionId(recipe.id);
             try {
-              const result = await createRecipe(String(currentUser.id), dto);
-              // 백엔드 AI가 계산한 영양소를 로컬 레시피에도 반영
+              const numericRecipeId = Number(recipe.id);
+              let backendId = recipe.backendId ?? (Number.isFinite(numericRecipeId) ? numericRecipeId : undefined);
+
+              if (!backendId) {
+                const created = await createRecipe(String(currentUser.id), {
+                  title: recipe.title,
+                  content: recipe.steps.join('\n'),
+                  ingredients: recipe.ingredients.map((i) => i.name),
+                  cooking_tools: recipe.tools ?? [],
+                  steps: recipe.steps.map((s, idx) => ({ step_number: idx + 1, description: s })),
+                });
+                backendId = created.id;
+              }
+
+              const currentServerRecipe = backendId
+                ? await getRecipeById(backendId).catch(() => null)
+                : null;
+              const result = currentServerRecipe?.is_public === true
+                ? currentServerRecipe
+                : await toggleRecipePublic(backendId, String(currentUser.id));
+
+              const fullResult = (!result.title && backendId)
+                ? await getRecipeById(backendId).catch(() => result)
+                : result;
+
+              const publishedServerId = fullResult.id ?? result.id ?? backendId;
               const nutrition = {
-                calories: result.calories ?? 0,
-                carbs: result.carbs ?? 0,
-                protein: result.protein ?? 0,
-                fat: result.fat ?? 0,
-                fiber: result.fiber ?? 0,
-                sugar: result.sugar ?? 0,
-                sodium: result.sodium ?? 0,
+                calories: fullResult.calories ?? result.calories ?? recipe.totalNutrition.calories ?? 0,
+                carbs: fullResult.carbs ?? result.carbs ?? recipe.totalNutrition.carbs ?? 0,
+                protein: fullResult.protein ?? result.protein ?? recipe.totalNutrition.protein ?? 0,
+                fat: fullResult.fat ?? result.fat ?? recipe.totalNutrition.fat ?? 0,
+                fiber: fullResult.fiber ?? result.fiber ?? recipe.totalNutrition.fiber ?? 0,
+                sugar: fullResult.sugar ?? result.sugar ?? recipe.totalNutrition.sugar ?? 0,
+                sodium: fullResult.sodium ?? result.sodium ?? recipe.totalNutrition.sodium ?? 0,
               };
-              // result.is_public이 true일 때만 공개됨 배지 표시
-              // 백엔드가 is_public: false로 응답하면 비공개 상태 유지
-              const isActuallyPublic = result.is_public === true;
+              const mergedRecipe: BackendRecipe = {
+                ...fullResult,
+                id: publishedServerId,
+                title: fullResult.title || recipe.title,
+                content: fullResult.content ?? recipe.steps.join('\n'),
+                likes_count: fullResult.likes_count ?? 0,
+                created_at: fullResult.created_at ?? new Date().toISOString(),
+                ingredients: fullResult.ingredients?.length
+                  ? fullResult.ingredients
+                  : recipe.ingredients.map((i, idx) => ({ id: idx, name: i.name })),
+                cooking_tools: fullResult.cooking_tools?.length
+                  ? fullResult.cooking_tools
+                  : (recipe.tools ?? []).map((name, idx) => ({ id: idx, name })),
+                steps: fullResult.steps?.length
+                  ? fullResult.steps
+                  : recipe.steps.map((description, idx) => ({ step_number: idx + 1, description })),
+                calories: nutrition.calories,
+                carbs: nutrition.carbs,
+                protein: nutrition.protein,
+                fat: nutrition.fat,
+                fiber: nutrition.fiber,
+                sugar: nutrition.sugar,
+                sodium: nutrition.sodium,
+                is_public: fullResult.is_public ?? result.is_public ?? true,
+              };
+              const isActuallyPublic = mergedRecipe.is_public !== false;
               const published = {
                 ...recipe,
-                sharedRecipeId: isActuallyPublic ? result.id : undefined,
+                backendId: publishedServerId,
+                sharedRecipeId: isActuallyPublic ? publishedServerId : undefined,
+                isPublic: isActuallyPublic,
                 totalNutrition: nutrition,
               };
               updateUserRecipe(published);
+
               if (isActuallyPublic) {
-                setAllRecipes((prev) => [backendToRecipe(result), ...prev]);
-                Alert.alert('공개 완료! 🎉', `"${recipe.title}" 레시피가 레시피 탭에 공개됐어요.`);
+                const publicRecipe = backendToRecipe(mergedRecipe);
+                setAllRecipes((prev) => [publicRecipe, ...prev.filter((r) => r.id !== publishedServerId)]);
+                setTop3Recipes((prev) => [publicRecipe, ...prev.filter((r) => r.id !== publishedServerId)]
+                  .sort((a, b) => b.likes - a.likes)
+                  .slice(0, 3));
+                refreshTop3Soon();
+                Alert.alert('\uACF5\uAC1C \uC644\uB8CC!', `"${recipe.title}" \uB808\uC2DC\uD53C\uAC00 \uB808\uC2DC\uD53C \uD0ED\uC5D0 \uACF5\uAC1C\uB410\uC5B4\uC694.`);
               } else {
-                // 백엔드가 비공개로 저장한 경우 (is_public: false 기본값)
-                // 백엔드에서 is_public 전환 API가 구현되면 이 분기 사라짐
-                Alert.alert('저장됐어요', `"${recipe.title}"이 서버에 저장됐어요.
-공개 처리는 백엔드 업데이트 후 지원될 예정이에요.`);
+                Alert.alert('\uACF5\uAC1C \uC804\uD658 \uD655\uC778', '\uC11C\uBC84\uAC00 \uC544\uC9C1 \uBE44\uACF5\uAC1C \uC0C1\uD0DC\uB85C \uC751\uB2F5\uD588\uC5B4\uC694.');
               }
             } catch {
-              Alert.alert('오류', '공개에 실패했어요. 잠시 후 다시 시도해주세요.');
+              Alert.alert('\uC624\uB958', '\uACF5\uAC1C\uC5D0 \uC2E4\uD328\uD588\uC5B4\uC694. \uC7A0\uC2DC \uD6C4 \uB2E4\uC2DC \uC2DC\uB3C4\uD574\uC8FC\uC138\uC694.');
+            } finally {
+              setRecipeActionId(null);
             }
           },
         },
@@ -969,13 +1196,6 @@ export default function RecipeScreen() {
     );
   };
 
-  // ─────────────────────────────────────────────────────────────────────────
-  // handleUnpublishUserRecipe: 공개 레시피를 비공개로 전환
-  // - 낙관적 업데이트: 즉시 allRecipes에서 제거 + sharedRecipeId 초기화
-  // - DELETE /recipes/:id/:userId 호출 (백엔드 미구현 시 catch로 무시)
-  //   → 백엔드 구현되면 DB에서도 삭제, 앱 재시작 후에도 사라짐
-  //   → 미구현 상태: 로컬에선 사라지지만 앱 재시작 시 getRecipes()로 다시 표시됨
-  // ─────────────────────────────────────────────────────────────────────────
   const handleUnpublishUserRecipe = async (recipe: UserRecipe) => {
     Alert.alert(
       '비공개로 전환',
@@ -985,14 +1205,28 @@ export default function RecipeScreen() {
         {
           text: '비공개로 전환', style: 'destructive',
           onPress: async () => {
+            setRecipeActionId(recipe.id);
             // 로컬 즉시 반영
-            updateUserRecipe({ ...recipe, sharedRecipeId: undefined });
-            if (recipe.sharedRecipeId) {
-              setAllRecipes((prev) => prev.filter((r) => r.id !== recipe.sharedRecipeId));
-              // 백엔드 DELETE (구현되면 동작, 미구현 시 catch로 무시)
+            updateUserRecipe({ ...recipe, sharedRecipeId: undefined, isPublic: false });
+            const serverRecipeId = recipe.sharedRecipeId ?? recipe.backendId;
+            if (serverRecipeId) {
+              setAllRecipes((prev) => prev.filter((r) => r.id !== serverRecipeId));
+              setTop3Recipes((prev) => prev.filter((r) => r.id !== serverRecipeId));
+              refreshTop3Soon();
+              // PATCH /recipes/:id/public/:userId — is_public 토글 (삭제 아님)
               try {
-                await deleteRecipe(recipe.sharedRecipeId, String(currentUser?.id ?? ''));
-              } catch { /* 백엔드 DELETE 미구현 — 로컬만 반영 */ }
+                const currentServerRecipe = await getRecipeById(serverRecipeId).catch(() => null);
+                if (currentServerRecipe?.is_public !== false) {
+                  await toggleRecipePublic(serverRecipeId, String(currentUser?.id ?? ''));
+                }
+              } catch {
+                updateUserRecipe(recipe);
+                Alert.alert('오류', '비공개 전환에 실패했어요. 잠시 후 다시 시도해주세요.');
+              } finally {
+                setRecipeActionId(null);
+              }
+            } else {
+              setRecipeActionId(null);
             }
           },
         },
@@ -1013,9 +1247,24 @@ export default function RecipeScreen() {
         text: '삭제',
         style: 'destructive',
         onPress: () => {
+          // 1. 로컬 제거
           removeUserRecipe(r.id);
-          if (r.sharedRecipeId) {
-            setAllRecipes((prev) => prev.filter((a) => a.id !== r.sharedRecipeId));
+          // 2. 레시피 탭(allRecipes)에서도 제거
+          const serverRecipeId = r.sharedRecipeId ?? r.backendId;
+          if (serverRecipeId) {
+            setAllRecipes((prev) => prev.filter((a) => a.id !== serverRecipeId));
+            setTop3Recipes((prev) => prev.filter((r) => r.id !== serverRecipeId));
+              refreshTop3Soon();
+          }
+          // 3. 삭제된 서버 ID 영구 보관 (재시작/핫리로드 후 재복원 방지)
+          if (serverRecipeId) {
+            addDeletedRecipeServerId(serverRecipeId);
+          }
+          // 4. 백엔드 DELETE — sharedRecipeId(공개) 또는 backendId(비공개) 사용
+          if (currentUser && serverRecipeId) {
+            deleteRecipe(serverRecipeId, String(currentUser.id)).catch(() => {
+              // 서버 삭제 실패해도 로컬은 이미 제거됨 — 무시
+            });
           }
         },
       },
@@ -1137,6 +1386,9 @@ export default function RecipeScreen() {
               <Text style={styles.emptyIcon}>🤍</Text>
               <Text style={styles.emptyTitle}>즐겨찾기가 없어요</Text>
               <Text style={styles.emptySub}>레시피 탭에서 하트를 눌러보세요!</Text>
+              <TouchableOpacity style={styles.emptyActionBtn} onPress={() => setActiveTab(1)}>
+                <Text style={styles.emptyActionText}>레시피 보러가기</Text>
+              </TouchableOpacity>
             </View>
           }
         />
@@ -1202,6 +1454,17 @@ export default function RecipeScreen() {
               <View style={styles.emptyBox}>
                 <Text style={styles.emptyIcon}>🍽️</Text>
                 <Text style={styles.emptyTitle}>검색 결과가 없어요</Text>
+                <Text style={styles.emptySub}>검색어나 조리기구 필터를 바꿤보세요.</Text>
+                <View style={styles.emptyActionRow}>
+                  <TouchableOpacity style={styles.emptyActionBtn} onPress={() => setSearchText('')}>
+                    <Text style={styles.emptyActionText}>다른 검색어 입력</Text>
+                  </TouchableOpacity>
+                  {availableTools.length > 0 ? (
+                    <TouchableOpacity style={styles.emptyGhostBtn} onPress={() => setAvailableTools([])}>
+                      <Text style={styles.emptyGhostText}>필터 초기화</Text>
+                    </TouchableOpacity>
+                  ) : null}
+                </View>
               </View>
             }
           />
@@ -1217,6 +1480,60 @@ export default function RecipeScreen() {
           ListHeaderComponent={
             <>
               {/* 선택된 항목 + 레시피 추천 */}
+              {selectedIngredients.length >= 2 && (
+                <View style={{ marginBottom: spacing.sm }}>
+                  <TouchableOpacity
+                    style={{
+                      flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+                      paddingHorizontal: spacing.md, paddingVertical: spacing.sm,
+                      backgroundColor: '#fff', borderRadius: borderRadius.md, borderWidth: 1, borderColor: colors.border,
+                    }}
+                    onPress={() => setTab2ToolFilterVisible((v) => !v)}
+                  >
+                    <Text style={{ fontSize: 13, color: tab2AvailTools.length > 0 ? colors.primary : colors.textLight, fontWeight: '600' }}>
+                      {tab2AvailTools.length > 0 ? `\uD83C\uDF73 \uC870\uB9AC\uAE30\uAD6C ${tab2AvailTools.length}\uAC1C \uC120\uD0DD \uC911` : '\uD83C\uDF73 \uC870\uB9AC\uAE30\uAD6C \uD544\uD130'}
+                    </Text>
+                    <Text style={{ fontSize: 11, color: colors.textLight }}>{tab2ToolFilterVisible ? '\u25B2' : '\u25BC'}</Text>
+                  </TouchableOpacity>
+
+                  {tab2ToolFilterVisible && (
+                    <View style={{ marginTop: 6, padding: spacing.sm, backgroundColor: colors.background, borderRadius: borderRadius.md, borderWidth: 1, borderColor: colors.border }}>
+                      <Text style={{ fontSize: 11, color: colors.textLight, marginBottom: 6 }}>\uC0AC\uC6A9 \uAC00\uB2A5\uD55C \uC870\uB9AC\uAE30\uAD6C\uB97C \uC120\uD0DD\uD558\uC138\uC694</Text>
+                      <ScrollView horizontal showsHorizontalScrollIndicator={false}>
+                        <View style={{ flexDirection: 'row', gap: 6 }}>
+                          {COOKING_TOOLS.map((tool) => {
+                            const isAvailable = tab2AvailTools.includes(tool);
+                            return (
+                              <TouchableOpacity
+                                key={tool}
+                                onPress={() => setTab2AvailTools((prev) =>
+                                  isAvailable ? prev.filter((t) => t !== tool) : [...prev, tool]
+                                )}
+                                style={{
+                                  paddingHorizontal: 12, paddingVertical: 5,
+                                  borderRadius: 14, borderWidth: 1,
+                                  borderColor: isAvailable ? colors.primary : colors.border,
+                                  backgroundColor: isAvailable ? colors.primaryLight : '#fff',
+                                }}
+                              >
+                                <Text style={{ fontSize: 12, color: isAvailable ? colors.primary : colors.text, fontWeight: isAvailable ? '700' : '400' }}>
+                                  {isAvailable ? '\u2713 ' : ''}{tool}
+                                </Text>
+                              </TouchableOpacity>
+                            );
+                          })}
+                        </View>
+                      </ScrollView>
+                      {tab2AvailTools.length > 0 && (
+                        <TouchableOpacity onPress={() => setTab2AvailTools([])} style={{ marginTop: 6 }}>
+                          <Text style={{ fontSize: 12, color: colors.primary }}>\uD544\uD130 \uCD08\uAE30\uD654</Text>
+                        </TouchableOpacity>
+                      )}
+                    </View>
+                  )}
+                </View>
+              )}
+
               {selectedIngredients.length > 0 && (
                 <View style={styles.selectedBox}>
                   <View style={styles.selectedHeader}>
@@ -1258,17 +1575,25 @@ export default function RecipeScreen() {
                         ))}
                       </View>
                     ) : (
-                      <Text style={styles.noRecommend}>선택한 재료로 만들 수 있는 레시피가 없어요 😅</Text>
+                      <View style={styles.noRecommendBox}>
+                        <Text style={styles.noRecommend}>선택한 재료로 만들 수 있는 레시피가 없어요 ??</Text>
+                        <View style={styles.emptyActionRow}>
+                          {tab2AvailTools.length > 0 ? (
+                            <TouchableOpacity style={styles.emptyGhostBtn} onPress={() => setTab2AvailTools([])}>
+                              <Text style={styles.emptyGhostText}>필터 초기화</Text>
+                            </TouchableOpacity>
+                          ) : null}
+                          <TouchableOpacity style={styles.emptyActionBtn} onPress={() => setSelectedIngredients([])}>
+                            <Text style={styles.emptyActionText}>다른 재료 선택</Text>
+                          </TouchableOpacity>
+                        </View>
+                      </View>
                     )
                   ) : (
                     <Text style={styles.noRecommend}>재료·음식을 {2 - selectedIngredients.length}개 더 선택하면 레시피를 추천해드려요!</Text>
                   )}
                 </View>
               )}
-
-              <Text style={styles.sectionHint}>
-                카드 탭 = 선택(레시피 추천) · + 버튼 = 식단에 추가
-              </Text>
             </>
           }
           ListEmptyComponent={
@@ -1277,6 +1602,9 @@ export default function RecipeScreen() {
                 <Text style={styles.emptyIcon}>🥬</Text>
                 <Text style={styles.emptyTitle}>음식·재료가 없어요</Text>
                 <Text style={styles.emptySub}>검색하거나 레시피 탭에서 레시피를 불러와보세요</Text>
+                <TouchableOpacity style={styles.emptyActionBtn} onPress={() => setSearchText('')}>
+                  <Text style={styles.emptyActionText}>다른 검색어 입력</Text>
+                </TouchableOpacity>
               </View>
             )
           }
@@ -1298,11 +1626,8 @@ export default function RecipeScreen() {
           {/* URL 입력 카드 */}
           <View style={styles.youtubeCard}>
             <View style={styles.youtubeTitleRow}>
-              <Text style={styles.youtubeEmoji}>📹</Text>
-              <View>
-                <Text style={styles.youtubeTitle}>유튜브 레시피 가져오기</Text>
-                <Text style={styles.youtubeSub}>한국어 자막이 있는 요리 영상을 분석해드려요</Text>
-              </View>
+              <Text style={styles.youtubeTitle} numberOfLines={1}>📹 유튜브 레시피 가져오기</Text>
+              <Text style={styles.youtubeSub} numberOfLines={2}>자막이 있으면 분석하고, 실패하면 직접 작성으로 이어갈 수 있어요</Text>
             </View>
             <View style={styles.urlInputRow}>
               <TextInput
@@ -1310,12 +1635,15 @@ export default function RecipeScreen() {
                 placeholder="https://youtube.com/watch?v=..."
                 placeholderTextColor={colors.textLight}
                 value={youtubeUrl}
-                onChangeText={setYoutubeUrl}
+                onChangeText={(text) => {
+                  setYoutubeUrl(text);
+                  if (youtubeAnalysisError) setYoutubeAnalysisError(null);
+                }}
                 autoCapitalize="none"
                 autoCorrect={false}
               />
               {youtubeUrl ? (
-                <TouchableOpacity onPress={() => setYoutubeUrl('')}>
+                <TouchableOpacity onPress={() => { setYoutubeUrl(''); setYoutubeAnalysisError(null); }}>
                   <Text style={styles.clearBtn}>✕</Text>
                 </TouchableOpacity>
               ) : null}
@@ -1328,7 +1656,7 @@ export default function RecipeScreen() {
               {analyzing ? (
                 <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
                   <ActivityIndicator color="#fff" size="small" />
-                  <Text style={[styles.analyzeBtnText, { fontSize: 13 }]}>분석 중... (최대 2분 소요)</Text>
+                  <Text style={[styles.analyzeBtnText, { fontSize: 13 }]}>{analysisStatusText || '분석 중이에요.'}</Text>
                 </View>
               ) : (
                 <Text style={styles.analyzeBtnText}>🤖 레시피 분석하기</Text>
@@ -1337,6 +1665,21 @@ export default function RecipeScreen() {
           </View>
 
           {/* 분석 결과 */}
+          {youtubeAnalysisError ? (
+            <View style={styles.youtubeFallbackBox}>
+              <Text style={styles.youtubeFallbackTitle}>분석을 이어갈 방법이 있어요</Text>
+              <Text style={styles.youtubeFallbackText}>{youtubeAnalysisError}</Text>
+              <View style={styles.youtubeFallbackActions}>
+                <TouchableOpacity style={styles.youtubeFallbackGhostBtn} onPress={() => setYoutubeAnalysisError(null)}>
+                  <Text style={styles.youtubeFallbackGhostText}>다른 영상 입력</Text>
+                </TouchableOpacity>
+                <TouchableOpacity style={styles.youtubeFallbackPrimaryBtn} onPress={handleYoutubeFallbackWrite}>
+                  <Text style={styles.youtubeFallbackPrimaryText}>직접 작성으로 저장</Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+          ) : null}
+
           {analyzedRecipe && (
             <View style={styles.analyzedCard}>
               <View style={styles.analyzedHeader}>
@@ -1360,7 +1703,6 @@ export default function RecipeScreen() {
                 {analyzedRecipe.ingredients.map((ing, i) => (
                   <View key={i} style={styles.ingChip}>
                     <Text style={styles.ingChipText}>{ing.name}</Text>
-                    {ing.amount ? <Text style={styles.ingChipAmount}>{ing.amount}</Text> : null}
                   </View>
                 ))}
               </View>
@@ -1401,7 +1743,10 @@ export default function RecipeScreen() {
             <View style={styles.emptyBox}>
               <Text style={styles.emptyIcon}>📋</Text>
               <Text style={styles.emptyTitle}>저장된 레시피가 없어요</Text>
-              <Text style={styles.emptySub}>유튜브 URL을 붙여넣어 레시피를 가져와보세요!</Text>
+              <Text style={styles.emptySub}>직접 작성하거나 유튜브 URL로 레시피를 가져와보세요.</Text>
+              <TouchableOpacity style={styles.emptyActionBtn} onPress={openNewRecipe}>
+                <Text style={styles.emptyActionText}>레시피 작성하기</Text>
+              </TouchableOpacity>
             </View>
           ) : (
             userRecipes.map((r) => {
@@ -1411,6 +1756,8 @@ export default function RecipeScreen() {
                 id: 0, name: r.title, emoji: r.emoji,
                 category: r.category, per: `${r.servings}인분`, nutrition: n,
               };
+              const isPublicRecipe = r.isPublic ?? Boolean(r.sharedRecipeId);
+              const isServerSaved = Boolean(r.backendId ?? r.sharedRecipeId);
               return (
                 <View key={r.id} style={styles.card}>
                   <TouchableOpacity
@@ -1423,10 +1770,16 @@ export default function RecipeScreen() {
                       <View style={styles.cardTitleRow}>
                         <Text style={styles.cardTitle} numberOfLines={1}>{r.title}</Text>
                         <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
-                          {r.sharedRecipeId ? (
+                          {recipeActionId === r.id ? (
+                            <View style={styles.pendingBadge}>
+                              <ActivityIndicator size="small" color={colors.primary} />
+                              <Text style={styles.pendingBadgeText}>반영 중</Text>
+                            </View>
+                          ) : isPublicRecipe ? (
                             <TouchableOpacity
                               style={styles.sharedBadge}
                               onPress={() => handleUnpublishUserRecipe(r)}
+                              disabled={recipeActionId === r.id}
                               hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
                             >
                               <Text style={styles.sharedBadgeText}>🌐 공개됨 ∨</Text>
@@ -1435,17 +1788,30 @@ export default function RecipeScreen() {
                             <TouchableOpacity
                               style={styles.privateBadgeBtn}
                               onPress={() => handlePublishUserRecipe(r)}
+                              disabled={recipeActionId === r.id}
                               hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
                             >
                               <Text style={styles.privateBadgeText}>🔒 비공개  →공개</Text>
                             </TouchableOpacity>
                           )}
-                          <TouchableOpacity onPress={() => handleDeleteUserRecipe(r)}>
+                          <TouchableOpacity onPress={() => handleDeleteUserRecipe(r)} disabled={recipeActionId === r.id}>
                             <Text style={{ fontSize: 16 }}>🗑️</Text>
                           </TouchableOpacity>
                         </View>
                       </View>
                       <Text style={styles.cardMeta}>⏱️ {r.cookTime}분 · {r.category} · {r.servings}인분</Text>
+                      <View style={styles.recipeStatusRow}>
+                        <View style={[styles.recipeStatusPill, isPublicRecipe ? styles.recipeStatusPublic : styles.recipeStatusPrivate]}>
+                          <Text style={[styles.recipeStatusText, isPublicRecipe ? styles.recipeStatusPublicText : styles.recipeStatusPrivateText]}>
+                            {isPublicRecipe ? '공개' : '비공개'}
+                          </Text>
+                        </View>
+                        <View style={[styles.recipeStatusPill, isServerSaved ? styles.recipeStatusServer : styles.recipeStatusLocal]}>
+                          <Text style={[styles.recipeStatusText, isServerSaved ? styles.recipeStatusServerText : styles.recipeStatusLocalText]}>
+                            {isServerSaved ? '서버 저장됨' : '로컬만 저장됨'}
+                          </Text>
+                        </View>
+                      </View>
                       {n.calories > 0 ? (
                         <View style={styles.calRow}>
                           <Text style={styles.cardCal}>🔥 {n.calories} kcal</Text>
@@ -1471,7 +1837,6 @@ export default function RecipeScreen() {
                           {r.ingredients.map((ing, i) => (
                             <View key={i} style={styles.ingChip}>
                               <Text style={styles.ingChipText}>{ing.name}</Text>
-                              {ing.amount ? <Text style={styles.ingChipAmount}>{ing.amount}</Text> : null}
                             </View>
                           ))}
                         </View>
@@ -1523,6 +1888,7 @@ export default function RecipeScreen() {
         initial={editInitial}
         userId={String(currentUser?.id ?? '')}
         ingredientSuggestions={allIngredientNames}
+        cookingToolOptions={COOKING_TOOLS}
         onClose={() => setEditModalVisible(false)}
         onSave={handleEditSave}
       />
@@ -1599,6 +1965,27 @@ const styles = StyleSheet.create({
   emptyIcon: { fontSize: 52, marginBottom: spacing.md },
   emptyTitle: { fontSize: 17, fontWeight: '800', color: colors.text, marginBottom: spacing.xs },
   emptySub: { fontSize: 13, color: colors.textLight, textAlign: 'center', lineHeight: 20 },
+  emptyActionRow: { flexDirection: 'row', gap: spacing.xs, marginTop: spacing.md, justifyContent: 'center', flexWrap: 'wrap' },
+  emptyActionBtn: {
+    marginTop: spacing.md,
+    backgroundColor: colors.primary,
+    borderRadius: borderRadius.md,
+    paddingHorizontal: spacing.md,
+    paddingVertical: 10,
+    alignItems: 'center',
+  },
+  emptyActionText: { color: '#fff', fontSize: 13, fontWeight: '800' },
+  emptyGhostBtn: {
+    marginTop: spacing.md,
+    backgroundColor: '#fff',
+    borderRadius: borderRadius.md,
+    borderWidth: 1,
+    borderColor: colors.primary,
+    paddingHorizontal: spacing.md,
+    paddingVertical: 10,
+    alignItems: 'center',
+  },
+  emptyGhostText: { color: colors.primary, fontSize: 13, fontWeight: '800' },
 
   // ── 재료 필터 칩 ──
   chipRow: { gap: spacing.xs, marginBottom: spacing.xs },
@@ -1616,11 +2003,6 @@ const styles = StyleSheet.create({
   ingFilterCheck: { fontSize: 12, color: colors.primary, fontWeight: '800' },
   ingFilterText: { fontSize: 13, fontWeight: '600', color: colors.text, textAlign: 'center' },
   ingFilterTextSelected: { color: colors.primary, fontWeight: '800' },
-
-  sectionHint: {
-    fontSize: 12, color: colors.textLight, textAlign: 'center',
-    marginBottom: spacing.sm, marginTop: spacing.xs,
-  },
 
   // ── 선택된 재료 박스 ──
   selectedBox: {
@@ -1661,6 +2043,7 @@ const styles = StyleSheet.create({
   recommendCal: { fontSize: 11, color: colors.textLight, marginTop: 2 },
   recommendArrow: { fontSize: 22, color: colors.textLight, fontWeight: '300' },
   noRecommend: { fontSize: 13, color: colors.textLight, textAlign: 'center', paddingVertical: spacing.sm, marginTop: spacing.xs },
+  noRecommendBox: { alignItems: 'center', paddingVertical: spacing.xs },
 
   // ── 레시피 카드 ──
   card: {
@@ -1677,6 +2060,17 @@ const styles = StyleSheet.create({
   cardTitleRow: { flexDirection: 'row', alignItems: 'center', gap: spacing.xs, marginBottom: 2 },
   cardTitle: { fontSize: 15, fontWeight: '800', color: colors.text, flex: 1 },
   cardMeta: { fontSize: 12, color: colors.textLight, marginBottom: 4 },
+  recipeStatusRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 5, marginTop: 4, marginBottom: 5 },
+  recipeStatusPill: { borderRadius: 8, paddingHorizontal: 7, paddingVertical: 2, borderWidth: 1 },
+  recipeStatusText: { fontSize: 10, fontWeight: '800' },
+  recipeStatusPublic: { backgroundColor: '#EEF2FF', borderColor: '#C7D2FE' },
+  recipeStatusPublicText: { color: '#4F46E5' },
+  recipeStatusPrivate: { backgroundColor: '#F8FAFC', borderColor: '#CBD5E1' },
+  recipeStatusPrivateText: { color: '#64748B' },
+  recipeStatusServer: { backgroundColor: '#ECFDF5', borderColor: '#A7F3D0' },
+  recipeStatusServerText: { color: '#047857' },
+  recipeStatusLocal: { backgroundColor: '#FFFBEB', borderColor: '#FDE68A' },
+  recipeStatusLocalText: { color: '#92400E' },
   cardCreator: { fontSize: 11, color: colors.textLight, marginTop: 1, marginBottom: 2, fontStyle: 'italic' },
   cardCal: { fontSize: 13, color: colors.primary, fontWeight: '700', marginRight: spacing.sm },
   top3Card: {
@@ -1796,15 +2190,28 @@ const styles = StyleSheet.create({
   editRecipeBtnText: { color: colors.primary, fontSize: 13, fontWeight: '800' },
 
   // ── 유튜브 카드 ──
+  pendingBadge: {
+    flexDirection: 'row', alignItems: 'center', gap: 5,
+    backgroundColor: '#F8FAFC', borderRadius: 10,
+    paddingHorizontal: 8, paddingVertical: 3,
+    borderWidth: 1, borderColor: colors.border,
+  },
+  pendingBadgeText: { color: colors.primary, fontSize: 10, fontWeight: '800' },
+
   youtubeCard: {
     backgroundColor: '#fff', borderRadius: borderRadius.md,
-    padding: spacing.lg, marginBottom: spacing.sm,
+    padding: spacing.md, marginBottom: spacing.sm,
+    alignSelf: 'stretch',
+    width: '100%',
     ...shadow.small,
   },
-  youtubeTitleRow: { flexDirection: 'row', alignItems: 'center', gap: spacing.md, marginBottom: spacing.md },
-  youtubeEmoji: { fontSize: 36 },
-  youtubeTitle: { fontSize: 16, fontWeight: '900', color: colors.text },
-  youtubeSub: { fontSize: 12, color: colors.textLight, marginTop: 2 },
+  youtubeTitleRow: {
+    marginBottom: spacing.md,
+    alignSelf: 'stretch',
+    width: '100%',
+  },
+  youtubeTitle: { fontSize: 15, fontWeight: '900', color: colors.text, width: '100%' },
+  youtubeSub: { fontSize: 12, color: colors.textLight, marginTop: 4, lineHeight: 17, width: '100%', flexWrap: 'wrap' },
   urlInputRow: {
     flexDirection: 'row', alignItems: 'center',
     backgroundColor: colors.background,
@@ -1813,17 +2220,43 @@ const styles = StyleSheet.create({
     marginBottom: spacing.sm,
     borderWidth: 1, borderColor: colors.border,
     height: 44,
+    alignSelf: 'stretch',
+    width: '100%',
   },
-  urlInput: { flex: 1, fontSize: 13, color: colors.text },
+  urlInput: { flex: 1, minWidth: 0, fontSize: 13, color: colors.text },
   analyzeBtn: {
     backgroundColor: colors.primary, borderRadius: borderRadius.md,
     paddingVertical: 14, paddingHorizontal: spacing.md,
     alignItems: 'center', justifyContent: 'center',
+    alignSelf: 'stretch',
+    width: '100%',
   },
   analyzeBtnDisabled: { backgroundColor: colors.textLight },
   analyzeBtnText: { color: '#fff', fontSize: 15, fontWeight: '800', textAlign: 'center' },
 
   // ── 분석 결과 카드 ──
+  youtubeFallbackBox: {
+    marginTop: spacing.sm,
+    borderRadius: borderRadius.md,
+    borderWidth: 1,
+    borderColor: '#FBBF24',
+    backgroundColor: '#FFFBEB',
+    padding: spacing.md,
+  },
+  youtubeFallbackTitle: { fontSize: 13, fontWeight: '900', color: '#92400E', marginBottom: 4 },
+  youtubeFallbackText: { fontSize: 12, color: '#78350F', lineHeight: 18 },
+  youtubeFallbackActions: { flexDirection: 'row', gap: spacing.xs, marginTop: spacing.sm },
+  youtubeFallbackGhostBtn: {
+    flex: 1, alignItems: 'center', borderRadius: borderRadius.md,
+    paddingVertical: 10, borderWidth: 1, borderColor: '#F59E0B', backgroundColor: '#fff',
+  },
+  youtubeFallbackGhostText: { color: '#92400E', fontSize: 12, fontWeight: '800' },
+  youtubeFallbackPrimaryBtn: {
+    flex: 1, alignItems: 'center', borderRadius: borderRadius.md,
+    paddingVertical: 10, backgroundColor: colors.primary,
+  },
+  youtubeFallbackPrimaryText: { color: '#fff', fontSize: 12, fontWeight: '800' },
+
   analyzedCard: {
     backgroundColor: '#fff', borderRadius: borderRadius.md,
     padding: spacing.md, marginTop: spacing.sm,
@@ -1869,14 +2302,6 @@ const styles = StyleSheet.create({
     backgroundColor: '#EEF2FF', borderRadius: 8, paddingHorizontal: 6, paddingVertical: 2,
   },
   fiCal: { fontSize: 12, color: '#E74C3C', fontWeight: '700', marginRight: 4 },
-  fiNoNutri: { fontSize: 11, color: colors.textLight, fontStyle: 'italic' },
-  fiAddBtn: {
-    backgroundColor: colors.primary,
-    width: 36, height: 36,
-    borderRadius: 18,
-    alignItems: 'center', justifyContent: 'center',
-  },
-  fiAddBtnText: { color: '#fff', fontSize: 22, fontWeight: '700', lineHeight: 24 },
   tab2LoadingRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', padding: spacing.md },
   nutritionRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginTop: 6 },
   analyzedActions: { flexDirection: 'row', gap: 10, marginTop: spacing.md },

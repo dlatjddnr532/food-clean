@@ -9,7 +9,7 @@ import { setToken, clearToken } from '../api/config';
 import {
   AppContextType, AppUser, UserProfile, MealLogEntry,
   MealType, Food, DailyGoals, SignupData, ActivityLevel, GoalType, UserRecipe,
-  Supplement, SupplementTakenLog, SupplementTime,
+  Supplement, SupplementTakenLog,
 } from '../types';
 import { getMealLogs, getHomeDashboard } from '../api/diet';
 
@@ -21,6 +21,7 @@ const STORAGE_KEY_SUPPLEMENTS  = '@food_app:supplements';
 const STORAGE_KEY_SUPP_LOGS    = '@food_app:supplementLogs';
 const STORAGE_KEY_WATER_LOGS   = '@food_app:waterLogs';
 const STORAGE_KEY_DELETED_IDS  = '@food_app:deletedLogIds'; // 서버 DELETE 미지원 대비 로컬 삭제 ID 보관
+const STORAGE_KEY_DELETED_RECIPE_IDS = '@food_app:deletedRecipeServerIds'; // 삭제된 레시피 서버 ID 보관 (동기화 때 재복원 방지)
 
 const AppContext = createContext<AppContextType | null>(null);
 
@@ -130,6 +131,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
   // ── 나만의 레시피 상태 ──
   const [userRecipes, setUserRecipes] = useState<UserRecipe[]>([]); // 유튜브에서 가져온 레시피 목록
+  const [deletedRecipeServerIds, setDeletedRecipeServerIds] = useState<number[]>([]); // 삭제된 레시피 서버 ID 목록
 
   // ── 영양제 상태 ──
   const [supplements, setSupplements] = useState<Supplement[]>([]);
@@ -144,10 +146,11 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     (async () => {
       try {
-        const [storedToken, storedUser, storedRecipes, storedFavs, storedSupps, storedSuppLogs, storedWater] = await Promise.all([
+        const [storedToken, storedUser, storedRecipes, storedDeletedRecipeIds, storedFavs, storedSupps, storedSuppLogs, storedWater] = await Promise.all([
           AsyncStorage.getItem(STORAGE_KEY_TOKEN),
           AsyncStorage.getItem(STORAGE_KEY_USER),
           AsyncStorage.getItem(STORAGE_KEY_USER_RECIPES),
+          AsyncStorage.getItem(STORAGE_KEY_DELETED_RECIPE_IDS),
           AsyncStorage.getItem(STORAGE_KEY_FAVORITES),
           AsyncStorage.getItem(STORAGE_KEY_SUPPLEMENTS),
           AsyncStorage.getItem(STORAGE_KEY_SUPP_LOGS),
@@ -155,6 +158,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         ]);
         // 로그인 여부와 무관하게 로컬 데이터 복원
         try { if (storedRecipes) setUserRecipes(JSON.parse(storedRecipes)); } catch {}
+        try { if (storedDeletedRecipeIds) setDeletedRecipeServerIds(JSON.parse(storedDeletedRecipeIds)); } catch {}
         try { if (storedFavs)    setFavoriteIds(JSON.parse(storedFavs));    } catch {}
         try { if (storedSupps)   setSupplements(JSON.parse(storedSupps));   } catch {}
         try { if (storedSuppLogs) setSupplementLogs(JSON.parse(storedSuppLogs)); } catch {}
@@ -465,7 +469,17 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   // 백엔드 연결 시: POST /recipe → recipe 테이블 INSERT (is_system=false, created_by=user_id)
   // ============================================================
   const addUserRecipe = useCallback((recipe: UserRecipe) => {
-    setUserRecipes((prev) => [recipe, ...prev]);
+    setUserRecipes((prev) => {
+      const existingIndex = prev.findIndex((r) =>
+        r.id === recipe.id ||
+        (recipe.backendId !== undefined && r.backendId === recipe.backendId) ||
+        (recipe.sharedRecipeId !== undefined && r.sharedRecipeId === recipe.sharedRecipeId) ||
+        (recipe.backendId !== undefined && r.sharedRecipeId === recipe.backendId) ||
+        (recipe.sharedRecipeId !== undefined && r.backendId === recipe.sharedRecipeId)
+      );
+      if (existingIndex === -1) return [recipe, ...prev];
+      return prev.map((r, idx) => (idx === existingIndex ? { ...r, ...recipe } : r));
+    });
   }, []);
 
   // ============================================================
@@ -474,6 +488,16 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   // ============================================================
   const removeUserRecipe = useCallback((id: string) => {
     setUserRecipes((prev) => prev.filter((r) => r.id !== id));
+  }, []);
+
+  // 삭제된 레시피의 서버 ID를 영구 보관 (동기화 때 재복원 방지)
+  const addDeletedRecipeServerId = useCallback((serverId: number) => {
+    setDeletedRecipeServerIds((prev) => {
+      if (prev.includes(serverId)) return prev;
+      const next = [...prev, serverId];
+      AsyncStorage.setItem(STORAGE_KEY_DELETED_RECIPE_IDS, JSON.stringify(next)).catch(() => {});
+      return next;
+    });
   }, []);
 
   // ============================================================
@@ -498,7 +522,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     setSupplements((prev) => prev.map((s) => (s.id === updated.id ? updated : s)));
   }, []);
 
-  const toggleSupplementTaken = useCallback((supplementId: string, time: SupplementTime) => {
+  const toggleSupplementTaken = useCallback((supplementId: string, time: string) => {
     const today = new Date();
     const date = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
     setSupplementLogs((prev) => {
@@ -515,7 +539,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     });
   }, []);
 
-  const getTodayTakenTimes = useCallback((supplementId: string): SupplementTime[] => {
+  const getTodayTakenTimes = useCallback((supplementId: string): string[] => {
     const today = new Date();
     const date = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
     return supplementLogs.find((l) => l.supplementId === supplementId && l.date === date)?.times ?? [];
@@ -613,6 +637,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         addUserRecipe,
         removeUserRecipe,
         updateUserRecipe,
+        deletedRecipeServerIds,
+        addDeletedRecipeServerId,
         supplements,
         addSupplement,
         removeSupplement,

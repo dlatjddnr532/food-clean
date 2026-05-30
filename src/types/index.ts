@@ -55,22 +55,21 @@ export interface Recipe {
   creatorName?: string; // 작성자 닉네임 (소셜 피드 표시용)
 }
 
-// ── 영양제 관련 타입 ──
-export type SupplementTime = '아침' | '점심' | '저녁' | '취침';
-
+// Supplement types
 export interface Supplement {
   id: string;
-  name: string;          // 영양제 이름 (ex. 비타민C)
-  dosage: string;        // 복용량 (ex. 1정, 2캡슐)
-  times: SupplementTime[]; // 복용 시간대
-  nutrients: string;     // 영양 성분 자유 텍스트 (ex. 비타민C 1000mg)
-  color: string;         // 카드 강조색
+  name: string;
+  dosage: string;
+  times: string[];       // HH:mm format, e.g. ['08:00', '21:30']
+  nutrients: string;
+  color: string;
+  notificationIds?: string[]; // expo-notifications scheduled IDs
 }
 
 export interface SupplementTakenLog {
   supplementId: string;
   date: string;          // YYYY-MM-DD
-  times: SupplementTime[]; // 오늘 복용 완료한 시간대
+  times: string[];       // completed HH:mm times
 }
 
 export type Gender = 'male' | 'female';
@@ -116,7 +115,6 @@ export interface MealLogEntry {
 
 export interface UserRecipeIngredient {
   name: string;
-  amount: string;
 }
 
 export interface UserRecipe {
@@ -128,10 +126,12 @@ export interface UserRecipe {
   servings: number;
   youtubeUrl: string;
   ingredients: UserRecipeIngredient[];
+  tools?: string[];
   steps: string[];
   totalNutrition: NutritionInfo;
   createdAt: string;
   sharedRecipeId?: number;  // 공개 상태인 레시피의 백엔드 ID (공개됨 배지용)
+  isPublic?: boolean;
   backendId?: number;       // DB에 저장된 ID (비공개 포함, 삭제/공개 전환 시 사용)
 }
 
@@ -170,13 +170,15 @@ export interface AppContextType {
   addUserRecipe: (recipe: UserRecipe) => void;
   removeUserRecipe: (id: string) => void;
   updateUserRecipe: (recipe: UserRecipe) => void;
+  deletedRecipeServerIds: number[];
+  addDeletedRecipeServerId: (serverId: number) => void;
   supplements: Supplement[];
   addSupplement: (supp: Supplement) => void;
   removeSupplement: (id: string) => void;
   updateSupplement: (supp: Supplement) => void;
   supplementLogs: SupplementTakenLog[];
-  toggleSupplementTaken: (supplementId: string, time: SupplementTime) => void;
-  getTodayTakenTimes: (supplementId: string) => SupplementTime[];
+  toggleSupplementTaken: (supplementId: string, time: string) => void;
+  getTodayTakenTimes: (supplementId: string) => string[];
 }
 
 export interface SignupData {
